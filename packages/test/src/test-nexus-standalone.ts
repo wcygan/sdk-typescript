@@ -19,6 +19,7 @@ import * as temporalnexus from '@temporalio/nexus';
 import * as workflow from '@temporalio/workflow';
 import { CancelledFailure, TerminatedFailure, ApplicationFailure, NexusOperationFailure } from '@temporalio/common';
 import { helpers, makeTestFunction } from './helpers-integration';
+import { waitUntil } from './helpers';
 
 const test = makeTestFunction({
   workflowsPath: __filename,
@@ -227,7 +228,7 @@ test('terminate operation', async (t) => {
   });
 });
 
-test('list operations', async (t) => {
+test('count and list operations', async (t) => {
   const { createWorker, registerNexusEndpoint } = helpers(t);
   const { endpointName } = await registerNexusEndpoint();
   const { handler } = makeTestHandler();
@@ -245,6 +246,13 @@ test('list operations', async (t) => {
       });
       opIds.add(id);
     }
+
+    // Visibility has update delay, repeating query until the activity count is as expected
+    await waitUntil(async () => {
+      const result = await client.nexus.count(`Endpoint="${endpointName}"`);
+      return result.count == 3;
+    }, 10000);
+
     const seen = new Set<string>();
     for await (const op of client.nexus.list({ query: `Endpoint="${endpointName}"` })) {
       seen.add(op.operationId);
@@ -253,24 +261,6 @@ test('list operations', async (t) => {
     let intersection = 0;
     for (const id of opIds) if (seen.has(id)) intersection++;
     t.true(intersection >= 1, `expected at least 1 of ${opIds.size} operations in list, saw ${intersection}`);
-  });
-});
-
-test('count operations', async (t) => {
-  const { createWorker, registerNexusEndpoint } = helpers(t);
-  const { endpointName } = await registerNexusEndpoint();
-  const { handler } = makeTestHandler();
-  const worker = await createWorker({ nexusServices: [handler] });
-
-  await worker.runUntil(async () => {
-    const { client } = t.context.env;
-    const svc = client.nexus.createServiceClient({ endpoint: endpointName, service: testService });
-    await svc.startOperation(testService.operations.echo, 'count-test', {
-      id: 'count-op-' + randomUUID(),
-      scheduleToCloseTimeout: '10s',
-    });
-    const result = await client.nexus.count(`Endpoint="${endpointName}"`);
-    t.true(result.count >= 1);
   });
 });
 
