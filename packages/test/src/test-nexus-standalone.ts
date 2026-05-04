@@ -20,7 +20,23 @@ import * as workflow from '@temporalio/workflow';
 import { CancelledFailure, TerminatedFailure, ApplicationFailure, NexusOperationFailure } from '@temporalio/common';
 import { helpers, makeTestFunction } from './helpers-integration';
 
-const test = makeTestFunction({ workflowsPath: __filename });
+const test = makeTestFunction({
+  workflowsPath: __filename,
+  workflowEnvironmentOpts: {
+    server: {
+      extraArgs: [
+        '--dynamic-config-value',
+        'nexusoperation.enableStandalone=true',
+        '--dynamic-config-value',
+        'nexusoperation.enableChasm=true',
+        '--dynamic-config-value',
+        'system.refreshNexusEndpointsMinWait="0s"',
+        '--dynamic-config-value',
+        'history.enableChasmCallbacks=true',
+      ],
+    },
+  },
+});
 
 export const unblockEcho = workflow.defineUpdate<void, []>('unblockEcho');
 
