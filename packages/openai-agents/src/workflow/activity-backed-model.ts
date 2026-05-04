@@ -1,7 +1,9 @@
 import {
+  RequestUsage,
   Usage,
   withGenerationSpan,
   type Agent,
+  type AgentOutputItem,
   type Model,
   type ModelRequest,
   type ModelResponse,
@@ -40,17 +42,56 @@ export function toSerializedModelRequest(request: ModelRequest): SerializedModel
 }
 
 function fromSerializedModelResponse(wire: SerializedModelResponse): ModelResponse {
-  // Usage is the only class instance in ModelResponse that needs reconstruction. Its add() method
-  // is used by the Runner to accumulate token counts across turns. All AgentOutputItem variants in
-  // output[] are Zod-inferred plain objects — they survive JSON round-trip without reconstruction.
+  // wire.usage was projected field-by-field in toSerializedModelResponse (see worker/activities.ts).
+  // Narrow from JsonValue to the known wire shape for typed reconstruction.
+  const wu = wire.usage as {
+    requests?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    inputTokensDetails?: Array<Record<string, number>>;
+    outputTokensDetails?: Array<Record<string, number>>;
+    requestUsageEntries?: Array<{
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+      inputTokensDetails?: Record<string, number>;
+      outputTokensDetails?: Record<string, number>;
+      endpoint?: string;
+    }>;
+  };
+
+  const usage = new Usage({
+    requests: wu.requests,
+    inputTokens: wu.inputTokens ?? 0,
+    outputTokens: wu.outputTokens ?? 0,
+    totalTokens: wu.totalTokens ?? 0,
+    inputTokensDetails: wu.inputTokensDetails,
+    outputTokensDetails: wu.outputTokensDetails,
+  });
+  // Reconstruct RequestUsage class instances — prototype preserved for instanceof checks.
+  if (wu.requestUsageEntries) {
+    usage.requestUsageEntries = wu.requestUsageEntries.map(
+      (e) =>
+        new RequestUsage({
+          inputTokens: e.inputTokens,
+          outputTokens: e.outputTokens,
+          totalTokens: e.totalTokens,
+          inputTokensDetails: e.inputTokensDetails,
+          outputTokensDetails: e.outputTokensDetails,
+          endpoint: e.endpoint,
+        })
+    );
+  }
+
   return {
-    usage: new Usage(wire.usage as Record<string, unknown>),
-    output: wire.output,
+    usage,
+    // AgentOutputItem[] variants are Zod-inferred plain objects — survive JSON round-trip losslessly.
+    // Double-cast required for the same TS reason as toSerializedModelResponse (see activities.ts).
+    output: wire.output as unknown as AgentOutputItem[],
     responseId: wire.responseId,
     providerData: wire.providerData,
-    // Cast: __wireVersion stripped (protocol-only). Remaining fields are structurally compatible
-    // with ModelResponse at runtime — Usage is reconstructed above, output items are plain objects.
-  } as ModelResponse;
+  };
 }
 
 interface ModelActivities {

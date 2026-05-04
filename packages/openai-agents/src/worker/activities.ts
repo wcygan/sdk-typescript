@@ -1,4 +1,4 @@
-import type { ModelProvider, ModelRequest, ModelResponse } from '@openai/agents-core';
+import type { AgentInputItem, ModelProvider, ModelRequest, ModelResponse } from '@openai/agents-core';
 import { ApplicationFailure } from '@temporalio/common';
 import { heartbeat, activityInfo } from '@temporalio/activity';
 import {
@@ -13,11 +13,31 @@ import {
 export function toSerializedModelResponse(response: ModelResponse): SerializedModelResponse {
   return {
     __wireVersion: WIRE_VERSION,
-    // Usage is a class with an add() method, but all its data properties are JSON-safe primitives,
-    // arrays, or records. The double-cast is needed because TypeScript can't narrow a class to JsonValue.
-    usage: response.usage as unknown as JsonValue,
-    // AgentOutputItem[] items are Zod-inferred plain objects (no class instances, no methods).
-    // JSON round-trip preserves them losslessly. Double-cast needed for the same TS reason.
+    // Usage is a class whose add() method is stripped by JSON serialization.
+    // All data properties are JSON-safe — projected field-by-field so each field's safety is
+    // verifiable at the call site. requestUsageEntries contains RequestUsage class instances,
+    // also projected explicitly.
+    usage: {
+      requests: response.usage.requests,
+      inputTokens: response.usage.inputTokens,
+      outputTokens: response.usage.outputTokens,
+      totalTokens: response.usage.totalTokens,
+      inputTokensDetails: response.usage.inputTokensDetails,
+      outputTokensDetails: response.usage.outputTokensDetails,
+      ...(response.usage.requestUsageEntries !== undefined && {
+        requestUsageEntries: response.usage.requestUsageEntries.map((entry) => ({
+          inputTokens: entry.inputTokens,
+          outputTokens: entry.outputTokens,
+          totalTokens: entry.totalTokens,
+          inputTokensDetails: entry.inputTokensDetails,
+          outputTokensDetails: entry.outputTokensDetails,
+          endpoint: entry.endpoint,
+        })),
+      }),
+    } as JsonValue,
+    // AgentOutputItem[] variants are Zod-inferred plain objects — no class instances, no methods.
+    // Double-cast required: optional `providerData?: Record<string, any>` allows `undefined` values
+    // which prevents TS from narrowing the discriminated union to JsonValue in a single step.
     output: response.output as unknown as JsonValue[],
     responseId: response.responseId,
     providerData: response.providerData as Record<string, JsonValue> | undefined,
@@ -25,22 +45,24 @@ export function toSerializedModelResponse(response: ModelResponse): SerializedMo
 }
 
 function fromSerializedModelRequest(wire: SerializedModelRequest): ModelRequest {
+  // Field-by-field construction — TS structurally validates the overall shape.
+  // Only 3 fields need narrowing casts (widened to JsonValue during serialization).
+  // __wireVersion deliberately stripped — internal protocol field, not part of upstream ModelRequest.
   return {
     systemInstructions: wire.systemInstructions,
-    input: wire.input,
+    input: wire.input as string | AgentInputItem[],
     modelSettings: wire.modelSettings,
     tools: wire.tools,
     toolsExplicitlyProvided: wire.toolsExplicitlyProvided,
     outputType: wire.outputType,
     handoffs: wire.handoffs,
-    prompt: wire.prompt,
+    // Indexed access: Prompt and ModelTracing types are not exported from @openai/agents-core.
+    prompt: wire.prompt as ModelRequest['prompt'],
     previousResponseId: wire.previousResponseId,
     conversationId: wire.conversationId,
-    tracing: wire.tracing,
+    tracing: wire.tracing as ModelRequest['tracing'],
     overridePromptModel: wire.overridePromptModel,
-    // __wireVersion deliberately stripped — internal protocol field, not part of upstream ModelRequest.
-    // Type assertion: JsonValue wire fields are structurally compatible with their upstream types at runtime.
-  } as ModelRequest;
+  };
 }
 
 function getStatus(error: unknown): number | undefined {
