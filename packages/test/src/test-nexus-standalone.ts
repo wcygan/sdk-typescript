@@ -250,7 +250,7 @@ test('count and list operations', async (t) => {
     // Visibility has update delay, repeating query until the activity count is as expected
     await waitUntil(async () => {
       const result = await client.nexus.count(`Endpoint="${endpointName}"`);
-      return result.count == 3;
+      return result.count === 3;
     }, 10000);
 
     const seen = new Set<string>();
