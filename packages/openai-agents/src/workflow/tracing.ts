@@ -9,8 +9,18 @@ import {
   getGlobalTraceProvider,
 } from '@openai/agents-core';
 import { inWorkflowContext, workflowInfo, uuid4, log } from '@temporalio/workflow';
+import {
+  TRACER_NAME,
+  spanNameFromData,
+  staticAttributesFromSpanData,
+  dynamicAttributesFromSpanData,
+  agentTraceIdToOtelTraceId,
+  agentSpanIdToOtelSpanId,
+  installSeedableIdGenerator,
+  type SeedableIdGenerator,
+} from '../common/tracing-bridge';
 
-// --- Existing public helpers (preserved) ---
+// --- Workflow context helpers ---
 
 export function isInWorkflow(): boolean {
   return inWorkflowContext();
@@ -23,88 +33,11 @@ export function isReplaying(): boolean {
 
 // --- OTel bridge: maps OpenAI Agents SDK trace events to OTel spans ---
 
-const TRACER_NAME = '@temporalio/openai-agents';
 const REGISTERED_KEY = Symbol.for('temporal-openai-agents-processor-registered');
 
 // Shared config symbol — read by workflow interceptors (trace-interceptor.ts)
 // to gate addTemporalSpans / startTraces behavior.
 const CONFIG_SYMBOL = Symbol.for('temporal-openai-agents-config');
-
-function spanNameFromData(data: SpanData): string {
-  switch (data.type) {
-    case 'agent':
-      return `openai.agents.agent:${data.name}`;
-    case 'function':
-      return `openai.agents.function:${data.name}`;
-    case 'generation':
-      return 'openai.agents.generation';
-    case 'response':
-      return 'openai.agents.response';
-    case 'handoff':
-      return 'openai.agents.handoff';
-    case 'guardrail':
-      return `openai.agents.guardrail:${data.name}`;
-    case 'custom':
-      return `openai.agents.custom:${data.name}`;
-    case 'transcription':
-      return 'openai.agents.transcription';
-    case 'speech':
-      return 'openai.agents.speech';
-    case 'speech_group':
-      return 'openai.agents.speech_group';
-    case 'mcp_tools':
-      return 'openai.agents.mcp_tools';
-    default:
-      return 'openai.agents.unknown';
-  }
-}
-
-function staticAttributesFromSpanData(data: SpanData): otel.Attributes {
-  const attrs: otel.Attributes = { 'openai.agents.span_type': data.type };
-  switch (data.type) {
-    case 'agent':
-      attrs['openai.agents.agent.name'] = data.name;
-      if (data.handoffs) attrs['openai.agents.agent.handoffs'] = data.handoffs.join(',');
-      if (data.output_type) attrs['openai.agents.agent.output_type'] = data.output_type;
-      break;
-    case 'function':
-      attrs['openai.agents.function.name'] = data.name;
-      break;
-    case 'handoff':
-      if (data.from_agent) attrs['openai.agents.handoff.from_agent'] = data.from_agent;
-      if (data.to_agent) attrs['openai.agents.handoff.to_agent'] = data.to_agent;
-      break;
-    case 'guardrail':
-      attrs['openai.agents.guardrail.name'] = data.name;
-      break;
-    case 'custom':
-      attrs['openai.agents.custom.name'] = data.name;
-      break;
-    case 'mcp_tools':
-      if (data.server) attrs['openai.agents.mcp_tools.server'] = data.server;
-      break;
-  }
-  return attrs;
-}
-
-function dynamicAttributesFromSpanData(data: SpanData): otel.Attributes {
-  const attrs: otel.Attributes = {};
-  switch (data.type) {
-    case 'agent':
-      if (data.tools) attrs['openai.agents.agent.tools'] = data.tools.join(',');
-      break;
-    case 'generation':
-      if (data.model) attrs['openai.agents.generation.model'] = data.model;
-      break;
-    case 'guardrail':
-      attrs['openai.agents.guardrail.triggered'] = data.triggered;
-      break;
-    case 'mcp_tools':
-      if (data.result) attrs['openai.agents.mcp_tools.result'] = data.result.join(',');
-      break;
-  }
-  return attrs;
-}
 
 interface SpanEntry {
   span: otel.Span;
@@ -113,32 +46,37 @@ interface SpanEntry {
 
 export interface TemporalTracingProcessorOptions {
   /**
-   * When `true`, emit OTel spans even during workflow replay. Defaults to `false`.
-   * Useful for debugging replay-divergence issues where trace output helps identify
-   * which spans differ between original execution and replay.
-   */
-  startSpansInReplay?: boolean;
-
-  /**
-   * When `true` (default), workflow/activity interceptors wrap calls in
+   * When `true`, workflow/activity interceptors wrap calls in
    * `temporal:*` custom spans for Temporal-specific instrumentation.
-   * Set to `false` to disable these spans while keeping trace propagation.
+   * Set to `false` (default) to disable these spans while keeping trace propagation.
    *
    * Stored on `globalThis` so workflow interceptors (loaded via workflowModules)
    * can read it without direct access to plugin options.
    *
-   * Mirrors Python's `add_temporal_spans` parameter.
+   * Default: `false`.
    */
   addTemporalSpans?: boolean;
 
   /**
    * When `true`, restored trace contexts fire processor events (`onTraceStart`,
    * `onSpanStart`). When `false` (default), sets ALS context directly.
-   *
    * Stored on `globalThis` for workflow interceptor access.
-   * Mirrors Python's `start_traces` parameter.
    */
   startTraces?: boolean;
+}
+
+/**
+ * Builds an OTel context with a synthetic remote SpanContext for
+ * establishing trace ID inheritance and parent-child links.
+ */
+function syntheticParentContext(otelTraceId: string, otelParentSpanId: string): otel.Context {
+  const spanContext: otel.SpanContext = {
+    traceId: otelTraceId,
+    spanId: otelParentSpanId,
+    traceFlags: otel.TraceFlags.SAMPLED,
+    isRemote: true,
+  };
+  return otel.trace.setSpanContext(otel.ROOT_CONTEXT, spanContext);
 }
 
 /**
@@ -153,23 +91,29 @@ export interface TemporalTracingProcessorOptions {
  *    `crypto.randomUUID` with `uuid4()`. Catches any remaining `randomUUID`
  *    calls from upstream that bypass the TraceProvider.
  *
+ * OTel trace/span IDs are derived deterministically from agent SDK IDs
+ * using {@link agentTraceIdToOtelTraceId} and {@link agentSpanIdToOtelSpanId}.
+ * A {@link SeedableIdGenerator} is installed on the OTel Tracer to ensure
+ * each `tracer.startSpan()` produces spans with those derived IDs.
+ * The activity-side processor applies the same conversion, so OTel spans
+ * from both sides share the same trace ID and form a single trace tree.
+ *
  * **Timestamps**: The Temporal V8 sandbox replaces `Date` with a deterministic
  * clock. Upstream's only clock source is `timeIso()` in
  * `@openai/agents-core/dist/tracing/utils.js`, which calls
- * `new Date().toISOString()` — verified against v0.3.9. No `performance.now`,
- * `hrtime`, or other clock APIs are used. If a future upstream version
- * introduces a non-Date clock source, timestamps would diverge on replay
- * and an explicit override (like `installDeterministicTraceIds` for IDs)
- * would be needed.
+ * `new Date().toISOString()`. No `performance.now`, `hrtime`, or other clock
+ * APIs are used. If a future upstream version introduces a non-Date clock
+ * source, timestamps would diverge on replay and an explicit override
+ * (like `installDeterministicTraceIds` for IDs) would be needed.
  */
 export class TemporalTracingProcessor implements TracingProcessor {
   private readonly tracer: otel.Tracer;
-  private readonly startSpansInReplay: boolean;
+  private readonly idGen: SeedableIdGenerator;
   private readonly spans = new Map<string, Map<string, SpanEntry>>();
 
-  constructor(options?: TemporalTracingProcessorOptions) {
+  constructor(_options?: TemporalTracingProcessorOptions) {
     this.tracer = otel.trace.getTracer(TRACER_NAME);
-    this.startSpansInReplay = options?.startSpansInReplay ?? false;
+    this.idGen = installSeedableIdGenerator(this.tracer);
   }
 
   private getWorkflowSpans(): Map<string, SpanEntry> {
@@ -194,26 +138,26 @@ export class TemporalTracingProcessor implements TracingProcessor {
     if (inner.size === 0) this.spans.delete(wfId);
   }
 
-  private shouldSkip(): boolean {
-    return !this.startSpansInReplay && isReplaying();
-  }
-
   async onTraceStart(trace: Trace): Promise<void> {
-    if (this.shouldSkip()) return;
-
-    const parentCtx = otel.context.active();
     const attrs: otel.Attributes = { 'openai.agents.trace_id': trace.traceId };
     if (trace.name) attrs['openai.agents.trace.name'] = trace.name;
     if (trace.groupId) attrs['openai.agents.trace.group_id'] = trace.groupId;
 
-    const span = this.tracer.startSpan('openai.agents.run', { attributes: attrs }, parentCtx);
-    const ctx = otel.trace.setSpan(parentCtx, span);
+    const otelTraceId = agentTraceIdToOtelTraceId(trace.traceId);
+    // Use the first 16 chars of the derived trace ID as the root span's
+    // OTel span ID. This value is stable and unique per agent trace.
+    const rootOtelSpanId = otelTraceId.slice(0, 16);
+
+    // Seed so that tracer.startSpan() produces this exact trace+span ID pair.
+    this.idGen.seedTraceId(otelTraceId);
+    this.idGen.seedSpanId(rootOtelSpanId);
+
+    const span = this.tracer.startSpan('openai.agents.run', { attributes: attrs, root: true });
+    const ctx = otel.trace.setSpan(otel.ROOT_CONTEXT, span);
     this.getWorkflowSpans().set(trace.traceId, { span, context: ctx });
   }
 
   async onTraceEnd(trace: Trace): Promise<void> {
-    if (this.shouldSkip()) return;
-
     const entry = this.getSpanEntry(trace.traceId);
     if (!entry) return;
     entry.span.setStatus({ code: otel.SpanStatusCode.OK });
@@ -222,18 +166,26 @@ export class TemporalTracingProcessor implements TracingProcessor {
   }
 
   async onSpanStart(span: Span<SpanData>): Promise<void> {
-    if (this.shouldSkip()) return;
-
     const data = span.spanData;
     const name = spanNameFromData(data);
     const attrs = staticAttributesFromSpanData(data);
+
+    // Seed the OTel span ID with a deterministic value derived from the
+    // agent SDK span ID. The activity-side processor uses the same
+    // conversion, enabling cross-boundary parent-child links.
+    this.idGen.seedSpanId(agentSpanIdToOtelSpanId(span.spanId));
 
     let parentCtx: otel.Context;
     const parentEntry = span.parentId ? this.getSpanEntry(span.parentId) : this.getSpanEntry(span.traceId);
     if (parentEntry) {
       parentCtx = parentEntry.context;
     } else {
-      parentCtx = otel.context.active();
+      // Derive a synthetic OTel parent from the agent SDK IDs so that
+      // spans whose parent lives in a different processor (e.g. across
+      // the workflow/activity boundary) still land in the same OTel trace.
+      const otelTraceId = agentTraceIdToOtelTraceId(span.traceId);
+      const otelParentId = span.parentId ? agentSpanIdToOtelSpanId(span.parentId) : otelTraceId.slice(0, 16);
+      parentCtx = syntheticParentContext(otelTraceId, otelParentId);
     }
 
     const otelSpan = this.tracer.startSpan(name, { attributes: attrs }, parentCtx);
@@ -242,8 +194,6 @@ export class TemporalTracingProcessor implements TracingProcessor {
   }
 
   async onSpanEnd(span: Span<SpanData>): Promise<void> {
-    if (this.shouldSkip()) return;
-
     const entry = this.getSpanEntry(span.spanId);
     if (!entry) return;
 
@@ -286,9 +236,6 @@ const IDS_INSTALLED_KEY = Symbol.for('temporal-openai-agents-deterministic-ids')
  * to inject deterministic IDs from `workflow.uuid4()`. This is the primary
  * defense against replay non-determinism in trace/span IDs — the polyfill
  * in `load-polyfills.ts` is a secondary safety net.
- *
- * Mirrors Python's approach of overriding `gen_trace_id`/`gen_span_id` on
- * the trace provider.
  */
 function installDeterministicTraceIds(): void {
   if ((globalThis as any)[IDS_INSTALLED_KEY]) return;

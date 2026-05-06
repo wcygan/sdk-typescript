@@ -67,11 +67,19 @@ export interface TemporalRunOptions<TContext = undefined> {
 
 export interface TemporalOpenAIRunnerOptions extends ModelActivityOptions {
   /**
-   * When `true`, emit OTel spans even during workflow replay. Defaults to `false`.
-   * Useful for debugging replay-divergence issues where trace output helps identify
-   * which spans differ between original execution and replay.
+   * When `true`, workflow/activity interceptors wrap calls in
+   * `temporal:*` custom spans for Temporal-specific instrumentation.
+   * Set to `false` (default) to disable these spans while keeping trace propagation.
+   *
+   * Default: `false`.
    */
-  startSpansInReplay?: boolean;
+  addTemporalSpans?: boolean;
+
+  /**
+   * When `true`, restored trace contexts fire processor events (`onTraceStart`,
+   * `onSpanStart`). When `false` (default), sets ALS context directly.
+   */
+  startTraces?: boolean;
 }
 
 /**
@@ -84,9 +92,9 @@ export class TemporalOpenAIRunner {
   private readonly modelParams: ModelActivityOptions;
 
   constructor(options?: TemporalOpenAIRunnerOptions) {
-    const { startSpansInReplay, ...modelParams } = options ?? {};
+    const { addTemporalSpans, startTraces, ...modelParams } = options ?? {};
     this.modelParams = { ...DEFAULT_MODEL_ACTIVITY_OPTIONS, ...modelParams };
-    ensureTracingProcessorRegistered({ startSpansInReplay });
+    ensureTracingProcessorRegistered({ addTemporalSpans, startTraces });
   }
 
   /**

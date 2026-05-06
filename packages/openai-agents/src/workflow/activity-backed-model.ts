@@ -144,8 +144,8 @@ export class ActivityBackedModel implements Model {
   }
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    // Upstream model adapters emit a generation span inside getResponse().
-    // We mirror that here so the trace tree stays: agent → generation → activity.
+    // The trace tree requires agent → generation → activity nesting.
+    // Without this span, the activity call would be a direct child of the agent span.
     return withGenerationSpan(async (span) => {
       span.spanData.model = this.modelName;
 

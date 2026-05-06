@@ -719,13 +719,12 @@ test('Built-in tools pass through without serialization error', async (t) => {
 
 // --- Bug exercise tests: handoff, cycle, prompt, model validation ---
 
-// T1 — F1: Handoff instance (via handoff()) reaches target agent via activity
 function* handoffInstanceGenerator() {
   yield handoffResponse('transfer_to_WeatherSpecialist');
   yield textResponse('Specialist says: sunny!');
 }
 
-test('F1: Handoff-instance handoff reaches target agent via model activity', async (t) => {
+test('Handoff-instance handoff reaches target agent via model activity', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -759,8 +758,7 @@ test('F1: Handoff-instance handoff reaches target agent via model activity', asy
   });
 });
 
-// T2 — F2: Cyclic handoff graph terminates without stack overflow
-test('F2: Cyclic handoff graph terminates without stack overflow', async (t) => {
+test('Cyclic handoff graph terminates without stack overflow', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -780,8 +778,7 @@ test('F2: Cyclic handoff graph terminates without stack overflow', async (t) => 
   });
 });
 
-// T3 — F3: prompt field is forwarded to the activity
-test('F3: prompt field is forwarded through ActivityBackedModel to the activity', async (t) => {
+test('prompt field is forwarded through ActivityBackedModel to the activity', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const provider = new RequestCapturingModelProvider();
@@ -808,8 +805,7 @@ test('F3: prompt field is forwarded through ActivityBackedModel to the activity'
   t.is(receivedPrompt?.promptId, 'pt_test', `Expected promptId 'pt_test', got: ${receivedPrompt?.promptId}`);
 });
 
-// T4 — F4: Non-string agent.model throws AgentsWorkflowError
-test('F4: Non-string agent.model throws AgentsWorkflowError', async (t) => {
+test('Non-string agent.model throws AgentsWorkflowError', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -841,8 +837,7 @@ test('F4: Non-string agent.model throws AgentsWorkflowError', async (t) => {
   });
 });
 
-// T5a — F5: SDK-shape 429 (status on error directly) classified as retryable
-test('F5: SDK-shape 429 (error.status) classified as retryable', async (t) => {
+test('SDK-shape 429 (error.status) classified as retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const sdkError429 = new Error('Rate limit exceeded');
@@ -876,8 +871,7 @@ test('F5: SDK-shape 429 (error.status) classified as retryable', async (t) => {
   });
 });
 
-// T5b — F5: SDK-shape 400 (status on error directly) classified as non-retryable
-test('F5: SDK-shape 400 (error.status) classified as non-retryable', async (t) => {
+test('SDK-shape 400 (error.status) classified as non-retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const sdkError400 = new Error('Bad request: invalid parameters');
@@ -912,8 +906,7 @@ test('F5: SDK-shape 400 (error.status) classified as non-retryable', async (t) =
   });
 });
 
-// T6 — F6: retry-after-ms header is honored as nextRetryDelay
-test('F6: retry-after-ms header sets nextRetryDelay on activity failure', async (t) => {
+test('retry-after-ms header sets nextRetryDelay on activity failure', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error429 = new Error('Rate limited');
@@ -951,8 +944,7 @@ test('F6: retry-after-ms header sets nextRetryDelay on activity failure', async 
   });
 });
 
-// T7 — F13: TemporalFailure in Error.cause is unwrapped, not re-wrapped as AgentsWorkflowError
-test('F13: TemporalFailure in Error.cause is unwrapped and re-thrown', async (t) => {
+test('TemporalFailure in Error.cause is unwrapped and re-thrown', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -974,8 +966,8 @@ test('F13: TemporalFailure in Error.cause is unwrapped and re-thrown', async (t)
     });
     t.truthy(err);
 
-    // If F13 is fixed: inner ApplicationFailure (type 'InnerFailureType') is re-thrown directly
-    // If F13 is buggy: runner wraps as 'AgentsWorkflowError', losing the original type
+    // Inner ApplicationFailure (type 'InnerFailureType') must be re-thrown directly,
+    // not wrapped as 'AgentsWorkflowError'.
     const cause = err!.cause as any;
     const failureType =
       cause?.failure?.applicationFailureInfo?.type ?? cause?.applicationFailureInfo?.type ?? cause?.type;
@@ -988,11 +980,7 @@ test('F13: TemporalFailure in Error.cause is unwrapped and re-thrown', async (t)
   });
 });
 
-// --- Error wrapping + streaming ---
-
-// C1 — F7: AgentsWorkflowError type tag is set on the ApplicationFailure created
-// by the runner, and appears on the serialized failure via the cause chain.
-test('C1/F7: AgentsWorkflowError type is preserved in serialized failure', async (t) => {
+test('AgentsWorkflowError type is preserved in serialized failure', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1021,9 +1009,8 @@ test('C1/F7: AgentsWorkflowError type is preserved in serialized failure', async
   });
 });
 
-// C1/F7: Verify runner wraps errors as ApplicationFailure with original error as cause.
-// The workflow catches the runner's error and inspects e.cause.name.
-test('C1/F7: Runner wraps error as ApplicationFailure with original Error cause', async (t) => {
+// Verify runner wraps errors as ApplicationFailure with original error as cause.
+test('Runner wraps error as ApplicationFailure with original Error cause', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1050,8 +1037,7 @@ test('C1/F7: Runner wraps error as ApplicationFailure with original Error cause'
   });
 });
 
-// C3 — F27: runStreamed() method was removed — calling it via `as any` fails at runtime.
-test('C3/F27: runStreamed call fails (method removed)', async (t) => {
+test('runStreamed is not available on TemporalOpenAIRunner', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1071,14 +1057,13 @@ test('C3/F27: runStreamed call fails (method removed)', async (t) => {
     const err = await t.throwsAsync(handle.result(), {
       instanceOf: WorkflowFailedError,
     });
-    t.truthy(err, 'Expected WorkflowFailedError when calling removed runStreamed()');
+    t.truthy(err, 'Expected WorkflowFailedError when calling runStreamed()');
   });
 });
 
 // --- Determinism + error hygiene ---
 
-// D1/F9: Non-Error thrown values should be preserved as cause
-test('D1/F9: Non-Error thrown value is wrapped and preserved as cause', async (t) => {
+test('Non-Error thrown value is wrapped and preserved as cause', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1115,8 +1100,7 @@ test('D1/F9: Non-Error thrown value is wrapped and preserved as cause', async (t
   });
 });
 
-// D3/F11: EventTarget polyfill should isolate listener errors
-test('D3/F11: EventTarget polyfill isolates listener errors', async (t) => {
+test('EventTarget polyfill isolates listener errors', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1137,8 +1121,7 @@ test('D3/F11: EventTarget polyfill isolates listener errors', async (t) => {
   });
 });
 
-// D4/F12: EventTarget polyfill should set event.target and event.currentTarget
-test('D4/F12: EventTarget polyfill sets event.target and event.currentTarget', async (t) => {
+test('EventTarget polyfill sets event.target and event.currentTarget', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1159,8 +1142,7 @@ test('D4/F12: EventTarget polyfill sets event.target and event.currentTarget', a
   });
 });
 
-// D5/F14: Error type should be derived from status code
-test('D5/F14: 429 error produces ModelInvocationError.RateLimit type', async (t) => {
+test('429 error produces ModelInvocationError.RateLimit type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error429 = new Error('Rate limit exceeded');
@@ -1192,7 +1174,7 @@ test('D5/F14: 429 error produces ModelInvocationError.RateLimit type', async (t)
   });
 });
 
-test('D5/F14: 401 error produces ModelInvocationError.Authentication type', async (t) => {
+test('401 error produces ModelInvocationError.Authentication type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error401 = new Error('Unauthorized');
@@ -1228,7 +1210,7 @@ test('D5/F14: 401 error produces ModelInvocationError.Authentication type', asyn
   });
 });
 
-test('D5/F14: 400 error produces ModelInvocationError.BadRequest type', async (t) => {
+test('400 error produces ModelInvocationError.BadRequest type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error400 = new Error('Bad request');
@@ -1260,7 +1242,7 @@ test('D5/F14: 400 error produces ModelInvocationError.BadRequest type', async (t
   });
 });
 
-test('D5/F14: 500 error produces ModelInvocationError.ServerError type', async (t) => {
+test('500 error produces ModelInvocationError.ServerError type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error500 = new Error('Internal server error');
@@ -1292,8 +1274,7 @@ test('D5/F14: 500 error produces ModelInvocationError.ServerError type', async (
   });
 });
 
-// D6/F15: Non-Error non-object (e.g. throw 42) produces non-retryable ApplicationFailure
-test('D6/F15: Non-Error non-object throw produces non-retryable failure', async (t) => {
+test('Non-Error non-object throw produces non-retryable failure', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1330,13 +1311,12 @@ test('D6/F15: Non-Error non-object throw produces non-retryable failure', async 
   });
 });
 
-// D7/F16: Date fields in ModelResponse are coerced by Temporal JSON serialization.
 // Temporal's default payload converter serializes via JSON.stringify.
 // Date objects become ISO strings, class instances become plain objects.
 // @openai/agents-core's ModelResponse uses plain JSON-safe types by default,
 // so this is typically not a concern. Custom ModelProviders that emit Dates
 // or class instances should pre-serialize them.
-test('D7/F16: Date in ModelResponse is coerced to string by Temporal serialization', async (t) => {
+test('Date in ModelResponse is coerced to string by Temporal serialization', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1364,13 +1344,13 @@ test('D7/F16: Date in ModelResponse is coerced to string by Temporal serializati
 
 // --- Tool validation ---
 
-// E3/F20: tool() from agents-core runs inline in workflow (permissive — matches Python)
+// tool() from agents-core runs inline in the workflow — no activity boundary
 function* inlineToolGenerator() {
   yield toolCallResponse('inlineTool', { input: 'hello' });
   yield textResponse('Tool said: processed: hello');
 }
 
-test('E3/F20: FunctionTool from tool() factory runs inline in workflow', async (t) => {
+test('FunctionTool from tool() factory runs inline in workflow', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1391,9 +1371,9 @@ test('E3/F20: FunctionTool from tool() factory runs inline in workflow', async (
   });
 });
 
-// --- F2: MCP prompts + provider ---
+// --- MCP prompts + provider ---
 
-test('F2: MCP listPrompts and getPrompt delegate to activities', async (t) => {
+test('MCP listPrompts and getPrompt delegate to activities', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1462,7 +1442,7 @@ function* mcpFactoryArgGenerator() {
   yield textResponse('The time for tenant-42 is 2026-01-01.');
 }
 
-test('F2: factoryArgument is passed through to MCP activities', async (t) => {
+test('factoryArgument is passed through to MCP activities', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   let receivedFactoryArg: unknown;
@@ -1514,7 +1494,7 @@ function* mcpProviderGenerator() {
   yield textResponse('Data retrieved via provider.');
 }
 
-test('F2: StatelessMCPServerProvider registers activities via plugin', async (t) => {
+test('StatelessMCPServerProvider registers activities via plugin', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const mcpProvider = new StatelessMCPServerProvider('providerMcp', {
@@ -1567,9 +1547,9 @@ test('F2: StatelessMCPServerProvider registers activities via plugin', async (t)
   });
 });
 
-// --- F4: Summary override ---
+// --- Summary override ---
 
-test('F4: summaryOverride string is passed through to model activity', async (t) => {
+test('summaryOverride string is passed through to model activity', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1617,9 +1597,9 @@ test('F4: summaryOverride string is passed through to model activity', async (t)
   });
 });
 
-// --- F1b: Tracing utilities ---
+// --- Tracing utilities ---
 
-test('F1b: Tracing utilities return correct values in workflow context', async (t) => {
+test('Tracing utilities return correct values in workflow context', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1640,9 +1620,9 @@ test('F1b: Tracing utilities return correct values in workflow context', async (
   });
 });
 
-// --- F5: Additional model activity parameters ---
+// --- Additional model activity parameters ---
 
-test('F5: Extended model params (priority) pass through without error', async (t) => {
+test('Extended model params (priority) pass through without error', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1663,19 +1643,14 @@ test('F5: Extended model params (priority) pass through without error', async (t
   });
 });
 
-// --- F1a: Public testing namespace ---
+// --- Public testing namespace ---
 
-test('F1a: Testing namespace exports are importable', async (t) => {
+test('Testing namespace exports are importable', async (t) => {
   // Verify the testing namespace is accessible from the main package
   const testing = await import('@temporalio/openai-agents/lib/testing');
 
   t.truthy(testing.FakeModel, 'FakeModel should be exported');
   t.truthy(testing.FakeModelProvider, 'FakeModelProvider should be exported');
-  t.truthy(testing.FakeModel, 'FakeModel should be exported (also covers former GeneratorFakeModel)');
-  t.truthy(
-    testing.FakeModelProvider,
-    'FakeModelProvider should be exported (also covers former GeneratorFakeModelProvider)'
-  );
   t.truthy(testing.textResponse, 'textResponse should be exported');
   t.truthy(testing.toolCallResponse, 'toolCallResponse should be exported');
   t.truthy(testing.handoffResponse, 'handoffResponse should be exported');
@@ -1687,10 +1662,10 @@ test('F1a: Testing namespace exports are importable', async (t) => {
   t.truthy(response.output, 'textResponse should produce a valid ModelResponse');
 });
 
-// --- Batch G: Test coverage gaps ---
+// --- Retry and replay ---
 
-// G2/F29: Verify retry policy is applied — retryState proves the server used the policy
-test('G2/F29: Retryable 429 error exhausts retry policy (retryState=MAXIMUM_ATTEMPTS_REACHED)', async (t) => {
+// Verify retry policy is applied — retryState proves the server used the policy
+test('Retryable 429 error exhausts retry policy (retryState=MAXIMUM_ATTEMPTS_REACHED)', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error429 = new Error('Rate limit exceeded');
@@ -1732,7 +1707,7 @@ test('G2/F29: Retryable 429 error exhausts retry policy (retryState=MAXIMUM_ATTE
   });
 });
 
-// G3/F32: Parallel tool calls — single model response containing multiple function_calls
+// Parallel tool calls — single model response containing multiple function_calls
 function* parallelToolCallGenerator() {
   yield multiToolCallResponse([
     { name: 'getWeather', args: { location: 'Tokyo' } },
@@ -1741,7 +1716,7 @@ function* parallelToolCallGenerator() {
   yield textResponse('Weather is sunny and 5+3=8.');
 }
 
-test('G3/F32: Parallel tool calls in one model response', async (t) => {
+test('Parallel tool calls in one model response', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1797,8 +1772,8 @@ test('G3/F32: Parallel tool calls in one model response', async (t) => {
   });
 });
 
-// G5/F34: Replay smoke test — verify determinism by replaying recorded history
-test('G5/F34: Workflow replay succeeds without determinism errors', async (t) => {
+// Replay smoke test — verify determinism by replaying recorded history
+test('Workflow replay succeeds without determinism errors', async (t) => {
   const { createWorker, startWorkflow, runReplayHistory } = helpers(t);
 
   let history: temporal.api.history.v1.IHistory | undefined;
@@ -1829,15 +1804,15 @@ test('G5/F34: Workflow replay succeeds without determinism errors', async (t) =>
   t.pass('Replay completed without determinism errors');
 });
 
-// G6/F-C: Schema-invalid tool input — activityAsTool does not validate args against schema
+// Schema-invalid tool input — activityAsTool does not validate args against schema
 function* schemaInvalidToolInputGenerator() {
   yield toolCallResponse('calculateSum', { x: 5, y: 3 });
   yield textResponse('The calculation returned a result.');
 }
 
-// --- H1: runConfig.model override reaches activity ---
+// --- runConfig.model override reaches activity ---
 
-test('H1: runConfig.model string override uses override model name in activity', async (t) => {
+test('runConfig.model string override uses override model name in activity', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const provider = new ModelNameCapturingModelProvider();
@@ -1865,9 +1840,9 @@ test('H1: runConfig.model string override uses override model name in activity',
   );
 });
 
-// --- H2: convertAgent catches raw function tools on handoff agents ---
+// --- convertAgent catches raw function tools on handoff agents ---
 
-test('H2: convertAgent catches raw function tool on handoff agent (Agent handoff)', async (t) => {
+test('convertAgent catches raw function tool on handoff agent (Agent handoff)', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1897,7 +1872,7 @@ test('H2: convertAgent catches raw function tool on handoff agent (Agent handoff
   });
 });
 
-test('H2: convertAgent catches raw function tool on handoff() instance agent', async (t) => {
+test('convertAgent catches raw function tool on handoff() instance agent', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1927,14 +1902,14 @@ test('H2: convertAgent catches raw function tool on handoff() instance agent', a
   });
 });
 
-// --- H5: Handoff mutation ---
+// --- Handoff mutation ---
 
 function* handoffMutationGenerator() {
   yield handoffResponse('transfer_to_Specialist');
   yield textResponse('Specialist says hello');
 }
 
-test('H5: convertAgent does not mutate original Handoff objects', async (t) => {
+test('convertAgent does not mutate original Handoff objects', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1959,9 +1934,9 @@ test('H5: convertAgent does not mutate original Handoff objects', async (t) => {
   });
 });
 
-// --- H3: Error classification edge cases ---
+// --- Error classification edge cases ---
 
-test('H3: 408 Timeout error produces ModelInvocationError.Timeout type', async (t) => {
+test('408 Timeout error produces ModelInvocationError.Timeout type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error408 = new Error('Request timeout');
@@ -1997,7 +1972,7 @@ test('H3: 408 Timeout error produces ModelInvocationError.Timeout type', async (
   });
 });
 
-test('H3: 409 Conflict error produces ModelInvocationError.Conflict type', async (t) => {
+test('409 Conflict error produces ModelInvocationError.Conflict type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error409 = new Error('Conflict');
@@ -2033,7 +2008,7 @@ test('H3: 409 Conflict error produces ModelInvocationError.Conflict type', async
   });
 });
 
-test('H3: 422 error produces ModelInvocationError.BadRequest type', async (t) => {
+test('422 error produces ModelInvocationError.BadRequest type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error422 = new Error('Unprocessable entity');
@@ -2069,7 +2044,7 @@ test('H3: 422 error produces ModelInvocationError.BadRequest type', async (t) =>
   });
 });
 
-test('H3: x-should-retry true overrides non-retryable 400 to retryable', async (t) => {
+test('x-should-retry true overrides non-retryable 400 to retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error400WithRetry = new Error('Bad request but should retry');
@@ -2106,7 +2081,7 @@ test('H3: x-should-retry true overrides non-retryable 400 to retryable', async (
   });
 });
 
-test('H3: Plain Error without HTTP status is non-retryable', async (t) => {
+test('Plain Error without HTTP status is non-retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2140,7 +2115,7 @@ test('H3: Plain Error without HTTP status is non-retryable', async (t) => {
   });
 });
 
-test('H3: x-should-retry false overrides retryable 429 to non-retryable', async (t) => {
+test('x-should-retry false overrides retryable 429 to non-retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const error429NoRetry = new Error('Rate limit but do not retry');
@@ -2177,14 +2152,14 @@ test('H3: x-should-retry false overrides retryable 429 to non-retryable', async 
   });
 });
 
-// --- NEW-1: Handoff option preservation ---
+// --- Handoff option preservation ---
 
 function* handoffCallbackGenerator() {
   yield handoffResponse('transfer_to_CallbackSpecialist', { reason: 'weather question' });
   yield textResponse('Specialist handled it!');
 }
 
-test('NEW-1: Handoff onHandoff callback is preserved through convertAgent', async (t) => {
+test('Handoff onHandoff callback is preserved through convertAgent', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2209,7 +2184,7 @@ test('NEW-1: Handoff onHandoff callback is preserved through convertAgent', asyn
   });
 });
 
-test('NEW-1b: Handoff isEnabled=false is preserved through convertAgent', async (t) => {
+test('Handoff isEnabled=false is preserved through convertAgent', async (t) => {
   const provider = new RequestCapturingModelProvider();
   const { createWorker, executeWorkflow } = helpers(t);
 
@@ -2235,7 +2210,7 @@ test('NEW-1b: Handoff isEnabled=false is preserved through convertAgent', async 
   );
 });
 
-test('NEW-1c: Handoff inputJsonSchema is preserved through convertAgent', async (t) => {
+test('Handoff inputJsonSchema is preserved through convertAgent', async (t) => {
   const provider = new RequestCapturingModelProvider();
   const { createWorker, executeWorkflow } = helpers(t);
 
@@ -2260,7 +2235,7 @@ test('NEW-1c: Handoff inputJsonSchema is preserved through convertAgent', async 
   );
 });
 
-test('G6/F-C: Schema-invalid tool input is passed through without validation', async (t) => {
+test('Schema-invalid tool input is passed through without validation', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2519,9 +2494,9 @@ test('Wire contract: upstream ModelResponse fields survive JSON round-trip (drif
   );
 });
 
-// --- T1: Tracing span capture ---
+// --- Tracing span capture ---
 
-test('T1: OpenAI Agents tracing path is active and produces trace/span events', async (t) => {
+test('OpenAI Agents tracing path is active and produces trace/span events', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2547,9 +2522,9 @@ test('T1: OpenAI Agents tracing path is active and produces trace/span events', 
   });
 });
 
-// --- T2: Replay-safety test ---
+// --- Replay-safety test ---
 
-test('T2: Tracing is replay-safe — no NondeterminismError when workflow replays', async (t) => {
+test('Tracing is replay-safe — no NondeterminismError when workflow replays', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2575,9 +2550,9 @@ test('T2: Tracing is replay-safe — no NondeterminismError when workflow replay
   });
 });
 
-// --- CLEANUP-6: Handoff-clone snapshot test ---
+// --- Handoff-clone snapshot test ---
 
-test('CLEANUP-6: Handoff clone preserves all public fields through convertAgent', async (t) => {
+test('Handoff clone preserves all public fields through convertAgent', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2602,9 +2577,9 @@ test('CLEANUP-6: Handoff clone preserves all public fields through convertAgent'
   });
 });
 
-// --- T3: Concurrent-workflow tracing isolation test ---
+// --- Concurrent-workflow tracing isolation test ---
 
-test('T3: Concurrent workflows on same worker have isolated trace spans', async (t) => {
+test('Concurrent workflows on same worker have isolated trace spans', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2649,9 +2624,9 @@ test('T3: Concurrent workflows on same worker have isolated trace spans', async 
   });
 });
 
-// --- T4: Trace context propagation across workflow/activity boundary ---
+// --- Trace context propagation across workflow/activity boundary ---
 
-test('T4: Agent trace context propagates across workflow/activity boundary', async (t) => {
+test('Agent trace context propagates across workflow/activity boundary', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2679,9 +2654,9 @@ test('T4: Agent trace context propagates across workflow/activity boundary', asy
   });
 });
 
-// --- T5: Client→workflow trace context propagation ---
+// --- Client→workflow trace context propagation ---
 
-test('T5: Client-side trace context propagates to workflow via interceptor', async (t) => {
+test('Client-side trace context propagates to workflow via interceptor', async (t) => {
   const { createWorker, taskQueue } = helpers(t);
 
   const worker = await createWorker({
@@ -2719,9 +2694,9 @@ test('T5: Client-side trace context propagates to workflow via interceptor', asy
   });
 });
 
-// --- T6: Signal trace context propagation ---
+// --- Signal trace context propagation ---
 
-test('T6: Signal carries trace context across workflow boundary', async (t) => {
+test('Signal carries trace context across workflow boundary', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2748,9 +2723,9 @@ test('T6: Signal carries trace context across workflow boundary', async (t) => {
   });
 });
 
-// --- T7: Child workflow trace context propagation ---
+// --- Child workflow trace context propagation ---
 
-test('T7: Child workflow receives propagated trace context from parent', async (t) => {
+test('Child workflow receives propagated trace context from parent', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2777,9 +2752,9 @@ test('T7: Child workflow receives propagated trace context from parent', async (
   });
 });
 
-// --- T8: Deterministic trace/span IDs and timestamps ---
+// --- Deterministic trace/span IDs and timestamps ---
 
-test('T8: Trace/span IDs and timestamps are deterministic across replay', async (t) => {
+test('Trace/span IDs and timestamps are deterministic across replay', async (t) => {
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({

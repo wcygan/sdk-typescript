@@ -21,7 +21,7 @@ export {
 } from '@temporalio/openai-agents/lib/testing';
 
 /**
- * Helper to create a ModelResponse with a Date field for testing serialization (D7/F16).
+ * Helper to create a ModelResponse with a Date field for testing serialization.
  */
 export function responseWithDate(text: string): ModelResponse {
   const base = _textResponse(text);
@@ -106,7 +106,7 @@ export class RequestCapturingModelProvider implements ModelProvider {
 
 /**
  * A model provider that captures the model name passed to getModel().
- * Used for testing that runConfig.model override reaches the activity (H1).
+ * Used for testing that runConfig.model override reaches the activity.
  */
 export class ModelNameCapturingModelProvider implements ModelProvider {
   public capturedModelNames: string[] = [];
@@ -119,7 +119,7 @@ export class ModelNameCapturingModelProvider implements ModelProvider {
 
 /**
  * A model that throws an arbitrary value (not necessarily an Error).
- * Used for testing error handling with non-Error throws (D1/F9, D6/F15).
+ * Used for testing error handling with non-Error throws.
  */
 export class ThrowAnythingModel implements Model {
   constructor(private value: unknown) {}

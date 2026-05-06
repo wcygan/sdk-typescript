@@ -36,7 +36,7 @@ import type * as activities from '../activities/openai-agents';
 
 /**
  * Basic workflow that creates an agent and runs it with a prompt.
- * The agent's model is automatically replaced with a ActivityBackedModel
+ * The agent's model is automatically replaced with an ActivityBackedModel
  * by the runner, so LLM calls go through activities.
  */
 export async function basicAgentWorkflow(prompt: string): Promise<string> {
@@ -323,12 +323,12 @@ export async function builtInToolAgentWorkflow(prompt: string): Promise<string> 
   return result.finalOutput ?? '';
 }
 
-// --- Regression exercise workflows ---
+// --- Edge-case workflows ---
 
 /**
- * F1: Uses handoff(agent) wrapper (Handoff instance, not raw Agent in handoffs array).
- * If F1 regresses, the Handoff's inner agent won't get its model replaced with
- * ActivityBackedModel, so its model call hits DummyModel and throws.
+ * Uses handoff(agent) wrapper (Handoff instance, not raw Agent in handoffs array).
+ * The Handoff's inner agent must get its model replaced with ActivityBackedModel;
+ * otherwise the model call hits DummyModel and throws.
  */
 export async function handoffInstanceWorkflow(question: string): Promise<string> {
   const weatherSpecialist = new Agent({
@@ -351,8 +351,8 @@ export async function handoffInstanceWorkflow(question: string): Promise<string>
 }
 
 /**
- * F2: Two agents with cyclic handoff references (A → B → A).
- * If the bug exists, convertAgent recurses infinitely and crashes with stack overflow.
+ * Two agents with cyclic handoff references (A → B → A).
+ * Verifies convertAgent terminates without stack overflow.
  */
 export async function cyclicHandoffWorkflow(prompt: string): Promise<string> {
   const agentA = new Agent({
@@ -374,10 +374,8 @@ export async function cyclicHandoffWorkflow(prompt: string): Promise<string> {
 }
 
 /**
- * F3: Agent with a prompt template. The prompt field on ModelRequest must
+ * Agent with a prompt template. The prompt field on ModelRequest must
  * survive serialization through ActivityBackedModel.
- * If the bug exists, prompt is stripped during destructuring and the model
- * never receives it.
  */
 export async function promptFieldWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -396,9 +394,8 @@ export async function promptFieldWorkflow(prompt: string): Promise<string> {
 }
 
 /**
- * F4: Agent with a non-string model (object instead of string).
- * If the bug exists, the object silently becomes 'default'.
- * If fixed, the runner throws immediately with a clear error.
+ * Agent with a non-string model (object instead of string).
+ * The runner must throw immediately with a clear error.
  */
 export async function nonStringModelWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -413,10 +410,9 @@ export async function nonStringModelWorkflow(prompt: string): Promise<string> {
 }
 
 /**
- * F13: Error whose .cause chain contains a TemporalFailure (ApplicationFailure).
+ * Error whose .cause chain contains a TemporalFailure (ApplicationFailure).
  * Simulates agents-core wrapping a Temporal failure in its own exception.
- * If the bug exists, the runner wraps it as AgentsWorkflowError (hiding the original).
- * If fixed, the runner walks .cause and re-throws the inner TemporalFailure.
+ * The runner must walk .cause and re-throw the inner TemporalFailure.
  */
 export async function wrappedTemporalFailureWorkflow(prompt: string): Promise<string> {
   const inner = ApplicationFailure.create({
@@ -441,9 +437,8 @@ export async function wrappedTemporalFailureWorkflow(prompt: string): Promise<st
 }
 
 /**
- * C1/F7: Catches the runner's error INSIDE the workflow to inspect the
- * error shape. The runner throws ApplicationFailure with the original
- * error as cause (no intermediate AgentsWorkflowError wrapper).
+ * Catches the runner's error INSIDE the workflow to inspect the error shape.
+ * The runner throws ApplicationFailure with the original Error as cause.
  */
 export async function agentsWorkflowErrorClassCheckWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -467,9 +462,9 @@ export async function agentsWorkflowErrorClassCheckWorkflow(prompt: string): Pro
 }
 
 /**
- * D3/F11: Tests EventTarget polyfill listener error isolation.
- * If the polyfill doesn't wrap listeners in try/catch, the first throwing listener
- * prevents subsequent listeners from firing and propagates the error.
+ * Tests EventTarget polyfill listener error isolation.
+ * The polyfill must wrap listeners in try/catch so one throwing listener
+ * doesn't prevent subsequent listeners from firing.
  */
 export async function eventTargetListenerErrorWorkflow(): Promise<{
   secondListenerCalled: boolean;
@@ -496,8 +491,7 @@ export async function eventTargetListenerErrorWorkflow(): Promise<{
 }
 
 /**
- * D4/F12: Tests EventTarget polyfill sets event.target and event.currentTarget.
- * If the polyfill doesn't set these fields, listeners see undefined.
+ * Tests EventTarget polyfill sets event.target and event.currentTarget.
  */
 export async function eventTargetTargetFieldWorkflow(): Promise<{
   targetDefined: boolean;
@@ -520,7 +514,7 @@ export async function eventTargetTargetFieldWorkflow(): Promise<{
 }
 
 /**
- * D7/F16: Tests Date field serialization in ModelResponse.
+ * Tests Date field serialization in ModelResponse.
  * Temporal's JSON converter coerces Date objects to ISO strings.
  */
 export async function dateInResponseWorkflow(prompt: string): Promise<{
@@ -543,9 +537,8 @@ export async function dateInResponseWorkflow(prompt: string): Promise<{
 }
 
 /**
- * C3/F27: Calls runner.runStreamed() which no longer exists on TemporalOpenAIRunner.
- * The method was removed — TS catches this at compile time. This workflow exercises
- * the runtime path (via `as any`) to verify it still fails cleanly.
+ * Calls runner.runStreamed() which does not exist on TemporalOpenAIRunner.
+ * Exercises the runtime path (via `as any`) to verify it fails cleanly.
  */
 export async function runStreamedWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -564,7 +557,7 @@ export async function runStreamedWorkflow(prompt: string): Promise<string> {
 }
 
 /**
- * E3/F20: Uses tool() from agents-core directly instead of activityAsTool().
+ * Uses tool() from agents-core directly instead of activityAsTool().
  * Deterministic tool() products run inline in the workflow — no activity overhead.
  * The tool's execute callback must be deterministic (no I/O, no randomness).
  */
@@ -597,11 +590,8 @@ export async function directToolFactoryWorkflow(prompt: string): Promise<string>
   return result.finalOutput ?? '';
 }
 
-// --- F2: MCP prompts ---
-
 /**
- * F2: Workflow that tests MCP listPrompts and getPrompt via activities.
- * Returns the prompt data directly to verify the activities were called.
+ * Workflow that tests MCP listPrompts and getPrompt via activities.
  */
 export async function mcpPromptsWorkflow(_prompt: string): Promise<{
   prompts: unknown[];
@@ -616,8 +606,7 @@ export async function mcpPromptsWorkflow(_prompt: string): Promise<{
 }
 
 /**
- * F2: Workflow that tests MCP factoryArgument passthrough.
- * The factoryArgument should be included in every activity call.
+ * Workflow that tests MCP factoryArgument passthrough.
  */
 export async function mcpFactoryArgWorkflow(prompt: string): Promise<string> {
   const mcpServer = statelessMcpServer('testMcp', {
@@ -637,8 +626,7 @@ export async function mcpFactoryArgWorkflow(prompt: string): Promise<string> {
 }
 
 /**
- * F2: Workflow that uses MCP server - same as mcpAgentWorkflow but intended to
- * be used with StatelessMCPServerProvider-registered activities on worker side.
+ * Workflow that uses MCP server via StatelessMCPServerProvider-registered activities.
  */
 export async function mcpProviderWorkflow(prompt: string): Promise<string> {
   const mcpServer = statelessMcpServer('providerMcp');
@@ -655,10 +643,8 @@ export async function mcpProviderWorkflow(prompt: string): Promise<string> {
   return result.finalOutput ?? '';
 }
 
-// --- F4: Summary override ---
-
 /**
- * F4: Workflow that uses summaryOverride string in model params.
+ * Workflow that uses summaryOverride string in model params.
  */
 export async function summaryOverrideStringWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -674,11 +660,8 @@ export async function summaryOverrideStringWorkflow(prompt: string): Promise<str
   return result.finalOutput ?? '';
 }
 
-// --- F1b: Tracing utilities ---
-
 /**
- * F1b: Workflow that verifies tracing utilities return expected values
- * when called from workflow context.
+ * Verifies tracing utilities return expected values from workflow context.
  */
 export async function tracingUtilitiesWorkflow(): Promise<{
   isInWf: boolean;
@@ -690,12 +673,9 @@ export async function tracingUtilitiesWorkflow(): Promise<{
   };
 }
 
-// --- H1: runConfig.model override verification ---
-
 /**
- * H1: Agent with explicit model 'original-model'. The test overrides via runConfig.model
- * to 'override-model'. If the override works, the activity receives 'override-model'.
- * If broken, the activity receives 'original-model' (convertAgent ignores the override).
+ * Agent with explicit model 'original-model'. The test overrides via runConfig.model
+ * to 'override-model' and verifies the activity receives the override.
  */
 export async function runConfigModelOverrideCheckWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -709,11 +689,9 @@ export async function runConfigModelOverrideCheckWorkflow(prompt: string): Promi
   return result.finalOutput ?? '';
 }
 
-// --- H2: convertAgent recursion into handoffs ---
-
 /**
- * H2: Handoff agent has a raw function tool that should be rejected.
- * If convertAgent doesn't recurse, the raw tool on the handoff agent is missed.
+ * Handoff agent has a raw function tool that should be rejected.
+ * convertAgent must recurse into handoff targets to validate their tools.
  */
 export async function handoffWithRawToolWorkflow(prompt: string): Promise<string> {
   const specialist = new Agent({
@@ -736,7 +714,7 @@ export async function handoffWithRawToolWorkflow(prompt: string): Promise<string
 }
 
 /**
- * H2b: Same as H2 but using handoff() wrapper instance.
+ * Same as handoffWithRawToolWorkflow but using handoff() wrapper instance.
  */
 export async function handoffInstanceWithRawToolWorkflow(prompt: string): Promise<string> {
   const specialist = new Agent({
@@ -758,12 +736,9 @@ export async function handoffInstanceWithRawToolWorkflow(prompt: string): Promis
   return result.finalOutput ?? '';
 }
 
-// --- H5: Handoff mutation check ---
-
 /**
- * H5: Tests that convertAgent does not mutate the original Handoff object.
- * Creates a handoff, runs the workflow, then checks if the original handoff's
- * agent still has its original model (not a ActivityBackedModel).
+ * Tests that convertAgent does not mutate the original Handoff object.
+ * The original handoff's agent must still have its original model after run.
  */
 export async function handoffMutationCheckWorkflow(prompt: string): Promise<string> {
   const specialist = new Agent({
@@ -795,11 +770,9 @@ export async function handoffMutationCheckWorkflow(prompt: string): Promise<stri
   });
 }
 
-// --- NEW-1: Handoff option preservation ---
-
 /**
- * NEW-1: Workflow with handoff that has onHandoff callback.
- * If convertAgent drops onInvokeHandoff, the callback never fires.
+ * Workflow with handoff that has onHandoff callback.
+ * convertAgent must preserve onInvokeHandoff so the callback fires.
  */
 export async function handoffOnHandoffCallbackWorkflow(prompt: string): Promise<{
   output: string;
@@ -839,7 +812,7 @@ export async function handoffOnHandoffCallbackWorkflow(prompt: string): Promise<
 }
 
 /**
- * NEW-1b: Handoff with isEnabled=false. If convertAgent drops isEnabled,
+ * Handoff with isEnabled=false. If convertAgent drops isEnabled,
  * the handoff defaults to always-enabled and appears in the model's tool list.
  */
 export async function handoffIsEnabledFalseWorkflow(prompt: string): Promise<string> {
@@ -866,8 +839,7 @@ export async function handoffIsEnabledFalseWorkflow(prompt: string): Promise<str
 }
 
 /**
- * NEW-1c: Handoff with custom inputJsonSchema. If convertAgent drops the schema,
- * it reverts to the default empty object schema.
+ * Handoff with custom inputJsonSchema. convertAgent must preserve the schema.
  */
 export async function handoffWithCustomSchemaWorkflow(prompt: string): Promise<string> {
   const specialist = new Agent({
@@ -899,10 +871,8 @@ export async function handoffWithCustomSchemaWorkflow(prompt: string): Promise<s
   return result.finalOutput ?? '';
 }
 
-// --- H3: Error classification edge cases ---
-
 /**
- * H3: Workflow for testing 408 Timeout error classification.
+ * Workflow for testing 408 Timeout error classification.
  */
 export async function timeoutErrorWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -920,7 +890,7 @@ export async function timeoutErrorWorkflow(prompt: string): Promise<string> {
 }
 
 /**
- * H3: Workflow for testing x-should-retry header override.
+ * Workflow for testing x-should-retry header override.
  */
 export async function xShouldRetryWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -937,10 +907,9 @@ export async function xShouldRetryWorkflow(prompt: string): Promise<string> {
   return result.finalOutput ?? '';
 }
 
-// --- H3: Plain error (no HTTP status) ---
 
 /**
- * H3: Workflow for testing that a plain Error without HTTP status/response
+ * Workflow for testing that a plain Error without HTTP status/response
  * is classified as non-retryable.
  */
 export async function plainErrorWorkflow(prompt: string): Promise<string> {
@@ -958,11 +927,8 @@ export async function plainErrorWorkflow(prompt: string): Promise<string> {
   return result.finalOutput ?? '';
 }
 
-// --- F5: Additional model activity parameters ---
-
 /**
- * F5: Workflow that uses priority in model params.
- * Verifies it doesn't cause errors when passed through.
+ * Workflow that uses priority in model params.
  */
 export async function extendedModelParamsWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -1087,13 +1053,9 @@ export async function wireRequestSnapshotWorkflow(): Promise<string[]> {
   return Object.keys(wire).sort();
 }
 
-// --- T1: Tracing span capture ---
-
 /**
- * T1: Verifies that the OpenAI Agents SDK tracing path is active (not disabled)
- * and that TemporalTracingProcessor receives trace/span events during an agent run.
- * Uses addTraceProcessor to install a lightweight capture processor that records
- * trace IDs and span types.
+ * Verifies that the OpenAI Agents SDK tracing path is active and that
+ * TemporalTracingProcessor receives trace/span events during an agent run.
  */
 export async function tracingSpanCaptureWorkflow(): Promise<{
   traceIds: string[];
@@ -1101,9 +1063,6 @@ export async function tracingSpanCaptureWorkflow(): Promise<{
 }> {
   const capture: { traceIds: string[]; spanTypes: string[] } = { traceIds: [], spanTypes: [] };
 
-  // TemporalOpenAIRunner constructor calls ensureTracingProcessorRegistered(),
-  // which uses setTraceProcessors([...]) on first invocation. We create the runner
-  // first so that call has already fired, then add our test processor on top.
   const runner = new TemporalOpenAIRunner();
 
   addTraceProcessor({
@@ -1131,13 +1090,8 @@ export async function tracingSpanCaptureWorkflow(): Promise<{
 }
 
 /**
- * T2: Replay-safety test workflow. Designed to run with maxCachedWorkflows: 0
+ * Replay-safety test workflow. Designed to run with maxCachedWorkflows: 0
  * so the worker evicts the workflow after each task and replays from scratch.
- *
- * The model activity creates a workflow task boundary. On the second task the
- * SDK replays from the beginning. The `isReplaying()` check at workflow start
- * captures whether replay occurred. Trace events are captured unconditionally
- * by the inline processor.
  */
 export async function replaySafetyWorkflow(): Promise<{
   traceIds: string[];
@@ -1175,11 +1129,6 @@ export async function replaySafetyWorkflow(): Promise<{
 
   return capture;
 }
-
-// --- CLEANUP-6: Handoff-clone snapshot test ---
-// Tests the Object.create clone technique used by convertAgent to clone Handoff
-// instances. Uses the same mechanism directly to avoid importing convertAgent
-// (which lives in the openai-agents package and may not be in the compiled output).
 
 export async function handoffCloneSnapshotWorkflow(): Promise<{
   fieldsPreserved: Record<string, boolean>;
@@ -1236,8 +1185,6 @@ export async function handoffCloneSnapshotWorkflow(): Promise<{
   };
 }
 
-// --- T3: Concurrent-workflow tracing isolation test ---
-
 export async function concurrentTracingIsolationWorkflow(): Promise<{
   traceIds: string[];
   spanTypes: string[];
@@ -1275,8 +1222,6 @@ export async function concurrentTracingIsolationWorkflow(): Promise<{
   return capture;
 }
 
-// --- T4: Trace context propagation across workflow/activity boundary ---
-
 export async function traceContextPropagationWorkflow(): Promise<{
   workflowTraceId: string;
   activityTraceId: string;
@@ -1308,14 +1253,10 @@ export async function traceContextPropagationWorkflow(): Promise<{
   return { workflowTraceId, activityTraceId };
 }
 
-// --- T5: Client→workflow trace context propagation ---
-
 export async function clientToWorkflowTraceWorkflow(): Promise<string> {
   new TemporalOpenAIRunner();
   return getCurrentTrace()?.traceId ?? 'NO_TRACE';
 }
-
-// --- T6: Signal trace context propagation ---
 
 const traceTestSignal = defineSignal('traceTestSignal');
 
@@ -1343,8 +1284,6 @@ export async function signalTracePropagationChildWorkflow(): Promise<string> {
   return capturedTraceId;
 }
 
-// --- T7: Child workflow trace context propagation ---
-
 export async function childWorkflowTracePropagationParentWorkflow(): Promise<{
   parentTraceId: string;
   childTraceId: string;
@@ -1361,8 +1300,6 @@ export async function childWorkflowTracePropagationParentWorkflow(): Promise<{
 export async function childWorkflowTracePropagationChildWorkflow(): Promise<string> {
   return getCurrentTrace()?.traceId ?? 'NO_TRACE';
 }
-
-// --- T8: Deterministic trace/span IDs and timestamps ---
 
 export async function deterministicTraceIdsWorkflow(): Promise<{
   traceIds: string[];

@@ -2,7 +2,6 @@
  * Client-outbound interceptor for propagating OpenAI Agents trace context
  * from the client to Temporal workflows, signals, queries, and updates.
  *
- * Mirrors Python's `_ContextPropagationClientOutboundInterceptor`.
  */
 import { getCurrentTrace, withCustomSpan } from '@openai/agents-core';
 import type {
@@ -20,11 +19,11 @@ import { currentAgentsSpanHeader, injectAgentsTraceHeader } from '../common/trac
 
 export interface OpenAIAgentsTraceClientInterceptorOptions {
   /**
-   * When `true` (default), wraps client calls (start workflow, signal,
+   * When `true`, wraps client calls (start workflow, signal,
    * query, update, signal-with-start, start-update-with-start) in
-   * `temporal:*` custom spans. Mirrors Python's `add_temporal_spans`.
+   * `temporal:*` custom spans.
    *
-   * @default true
+   * @default false
    */
   addTemporalSpans?: boolean;
 }
@@ -47,7 +46,7 @@ export class OpenAIAgentsTraceClientInterceptor {
   private readonly addTemporalSpans: boolean;
 
   constructor(options?: OpenAIAgentsTraceClientInterceptorOptions) {
-    this.addTemporalSpans = options?.addTemporalSpans !== false;
+    this.addTemporalSpans = options?.addTemporalSpans === true;
   }
 
   private maybeSpan<T>(spanName: string, fn: () => Promise<T>, data?: Record<string, unknown>): Promise<T> {

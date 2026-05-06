@@ -86,11 +86,9 @@ export function convertAgent(
     });
   }
   const activityBackedModel = new ActivityBackedModel(modelName, modelParams);
-  // Pass the ORIGINAL agent (pre-clone) so the summary provider sees the
-  // user-declared `name` and `instructions`, not the wrapper. The cloned
-  // agent has the same field values today, but binding to the original
-  // makes that invariance explicit and survives any future clone-side
-  // mutation.
+  // Bind to the original agent (pre-clone) so the summary provider sees the
+  // user-declared `name` and `instructions`. This invariant survives any
+  // future clone-side mutation.
   activityBackedModel.setAgent(agent);
 
   const converted = agent.clone({ model: activityBackedModel });

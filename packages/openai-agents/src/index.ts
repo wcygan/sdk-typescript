@@ -8,8 +8,6 @@
  * - workflowFailureExceptionTypes registration (TS SDK doesn't support)
  */
 
-// Main entry — all public exports (plugin, activities, workflow utilities, testing namespace, errors)
-
 export { OpenAIAgentsPlugin } from './worker/plugin';
 export type { OpenAIAgentsPluginOptions } from './worker/plugin';
 export { toSerializedModelResponse } from './worker/activities';

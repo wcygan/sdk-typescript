@@ -1,8 +1,9 @@
-import { withCustomSpan } from '@openai/agents-core';
+import { withCustomSpan, getCurrentTrace } from '@openai/agents-core';
 import type { Context as ActivityContext } from '@temporalio/activity';
 import type { Next, ActivityInboundCallsInterceptor, ActivityExecuteInput } from '@temporalio/worker';
 import { extractAgentsTraceHeader } from '../common/trace-header';
 import { withRestoredAgentsTraceContext } from '../common/trace-context';
+import { ensureActivityTracingProcessorRegistered } from './activity-tracing';
 
 export interface OpenAIAgentsTraceInterceptorOptions {
   /**
@@ -11,20 +12,21 @@ export interface OpenAIAgentsTraceInterceptorOptions {
    * When `false` (default), sets the AsyncLocalStorage context directly without
    * processor events — sufficient for ID propagation without duplicate trace entries.
    *
-   * Set to `true` if you register activity-side `TracingProcessor`s that need to
-   * see trace lifecycle events. The default `false` avoids duplication when only the
-   * workflow-side `TemporalTracingProcessor` is active.
-   *
-   * Default: `false` (matches Python's `start_traces=False`).
+   * Default: `false`.
    */
   startTraces?: boolean;
 
   /**
-   * When `true` (default), wraps intercepted calls in `temporal:*` custom spans
+   * When `true`, wraps intercepted calls in `temporal:*` custom spans
    * for Temporal-specific instrumentation (e.g. `temporal:executeActivity`).
-   * Set to `false` to disable these spans while keeping trace context propagation.
+   * Set to `false` (default) to disable these spans while keeping trace
+   * context propagation.
    *
-   * Mirrors Python's `add_temporal_spans` parameter.
+   * These options also need to be passed to every `new TemporalOpenAIRunner(...)`
+   * in your workflows — the plugin only configures the activity-side interceptor;
+   * the workflow-side interceptor reads its config from the runner constructor.
+   *
+   * Default: `false`.
    */
   addTemporalSpans?: boolean;
 }
@@ -32,8 +34,9 @@ export interface OpenAIAgentsTraceInterceptorOptions {
 /**
  * Activity inbound interceptor that restores OpenAI Agents trace context
  * from propagated headers and optionally wraps activity execution in a
- * `temporal:executeActivity` span. Mirrors Python's
- * `_ContextPropagationActivityInboundInterceptor`.
+ * `temporal:executeActivity` agent SDK custom span. When `addTemporalSpans`
+ * is enabled, the plugin registers an `ActivityTracingProcessor` that
+ * bridges these spans to OTel.
  */
 export class OpenAIAgentsTraceActivityInboundInterceptor implements ActivityInboundCallsInterceptor {
   private readonly ctx: ActivityContext;
@@ -43,23 +46,33 @@ export class OpenAIAgentsTraceActivityInboundInterceptor implements ActivityInbo
     private readonly options?: OpenAIAgentsTraceInterceptorOptions
   ) {
     this.ctx = ctx;
+
+    // Register the activity-side OTel bridge so that withCustomSpan calls
+    // in execute() produce OTel spans. Idempotent — only registers once
+    // per worker process regardless of how many activity interceptors are created.
+    if (this.options?.addTemporalSpans === true) {
+      ensureActivityTracingProcessorRegistered();
+    }
   }
 
   async execute(input: ActivityExecuteInput, next: Next<ActivityInboundCallsInterceptor, 'execute'>): Promise<unknown> {
     const header = extractAgentsTraceHeader(input.headers);
     if (!header?.traceId) return next(input);
 
-    const addSpans = this.options?.addTemporalSpans !== false;
+    const addSpans = this.options?.addTemporalSpans === true;
 
     return withRestoredAgentsTraceContext(
       header,
       async () => {
-        if (addSpans) {
+        if (addSpans && getCurrentTrace()) {
           const info = this.ctx.info;
           return withCustomSpan(() => next(input), {
             data: {
               name: 'temporal:executeActivity',
-              data: { activityId: info.activityId, activityType: info.activityType },
+              data: {
+                activityId: info.activityId,
+                activityType: info.activityType,
+              },
             },
           });
         }

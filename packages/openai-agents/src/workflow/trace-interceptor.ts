@@ -29,12 +29,11 @@ function getTracingConfig(): TracingConfig {
 }
 
 function shouldAddTemporalSpans(): boolean {
-  return getTracingConfig().addTemporalSpans !== false;
+  return getTracingConfig().addTemporalSpans === true;
 }
 
 /**
  * Conditionally wraps `fn` in a `withCustomSpan` call gated on `addTemporalSpans`.
- * Mirrors Python's `temporal_span()` / `maybe_span()` context managers.
  */
 async function maybeTemporalSpan<T>(
   spanName: string,
@@ -53,7 +52,6 @@ async function maybeTemporalSpan<T>(
  * Workflow inbound interceptor that restores OpenAI Agents trace context
  * from propagated headers on workflow execute, signal, query, and update.
  *
- * Mirrors Python's `_ContextPropagationWorkflowInboundInterceptor`.
  */
 export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCallsInterceptor {
   async execute(input: WorkflowExecuteInput, next: Next<WorkflowInboundCallsInterceptor, 'execute'>): Promise<unknown> {
@@ -88,7 +86,6 @@ export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCalls
   }
 
   async handleQuery(input: QueryInput, next: Next<WorkflowInboundCallsInterceptor, 'handleQuery'>): Promise<unknown> {
-    // Mirrors Python: queries get a span but NO header extraction.
     // Queries are read-only and don't carry propagated trace context.
     return maybeTemporalSpan('temporal:handleQuery', () => next(input), {
       queryName: input.queryName,
@@ -96,7 +93,6 @@ export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCalls
   }
 
   validateUpdate(input: UpdateInput, next: Next<WorkflowInboundCallsInterceptor, 'validateUpdate'>): void {
-    // Mirrors Python's handle_update_validator: restore context, no span.
     // Uses the sync ALS.run path — AsyncLocalStorage.run() is synchronous.
     const header = extractAgentsTraceHeader(input.headers);
     if (!header?.traceId) return next(input);
@@ -107,7 +103,6 @@ export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCalls
     input: UpdateInput,
     next: Next<WorkflowInboundCallsInterceptor, 'handleUpdate'>
   ): Promise<unknown> {
-    // Mirrors Python: extract header, restore context, no span.
     const header = extractAgentsTraceHeader(input.headers);
     if (!header?.traceId) return next(input);
 
@@ -128,50 +123,63 @@ export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCalls
  * workflow→child-workflow / workflow→signal boundaries (paired with
  * `OpenAIAgentsTraceInboundInterceptor`).
  *
- * Mirrors Python's `_ContextPropagationWorkflowOutboundInterceptor`.
  */
 export class OpenAIAgentsTraceOutboundInterceptor implements WorkflowOutboundCallsInterceptor {
   async scheduleActivity(
     input: ActivityInput,
     next: Next<WorkflowOutboundCallsInterceptor, 'scheduleActivity'>
   ): Promise<unknown> {
-    const header = currentAgentsSpanHeader();
-    if (!header) return next(input);
+    if (!getCurrentTrace()) return next(input);
 
-    const headers = injectAgentsTraceHeader(input.headers, header);
-    return maybeTemporalSpan(`temporal:startActivity:${input.activityType}`, () => next({ ...input, headers }), {
-      activityType: input.activityType,
-    });
+    // Header capture is inside the temporal span callback so that the
+    // propagated spanId is the `temporal:startActivity:*` span itself
+    // (when addTemporalSpans is enabled). The activity side uses this
+    // spanId to derive its OTel parent, nesting `temporal:executeActivity`
+    // under `temporal:startActivity:*` in the trace tree.
+    return maybeTemporalSpan(
+      `temporal:startActivity:${input.activityType}`,
+      () => {
+        const header = currentAgentsSpanHeader();
+        if (!header) return next(input);
+        const headers = injectAgentsTraceHeader(input.headers, header);
+        return next({ ...input, headers });
+      },
+      { activityType: input.activityType }
+    );
   }
 
   async scheduleLocalActivity(
     input: LocalActivityInput,
     next: Next<WorkflowOutboundCallsInterceptor, 'scheduleLocalActivity'>
   ): Promise<unknown> {
-    const header = currentAgentsSpanHeader();
-    if (!header) return next(input);
+    if (!getCurrentTrace()) return next(input);
 
-    const headers = injectAgentsTraceHeader(input.headers, header);
-    return maybeTemporalSpan(`temporal:startLocalActivity:${input.activityType}`, () => next({ ...input, headers }), {
-      activityType: input.activityType,
-    });
+    return maybeTemporalSpan(
+      `temporal:startLocalActivity:${input.activityType}`,
+      () => {
+        const header = currentAgentsSpanHeader();
+        if (!header) return next(input);
+        const headers = injectAgentsTraceHeader(input.headers, header);
+        return next({ ...input, headers });
+      },
+      { activityType: input.activityType }
+    );
   }
 
   async startChildWorkflowExecution(
     input: StartChildWorkflowExecutionInput,
     next: Next<WorkflowOutboundCallsInterceptor, 'startChildWorkflowExecution'>
   ): Promise<[Promise<string>, Promise<unknown>]> {
-    const header = currentAgentsSpanHeader();
-    if (!header) return next(input);
+    if (!getCurrentTrace()) return next(input);
 
-    const headers = injectAgentsTraceHeader(input.headers, header);
-
-    if (shouldAddTemporalSpans() && getCurrentTrace()) {
+    if (shouldAddTemporalSpans()) {
       const span = createCustomSpan({
         data: { name: `temporal:startChildWorkflow:${input.workflowType}`, data: { workflowType: input.workflowType } },
       });
       span.start();
       try {
+        const header = currentAgentsSpanHeader();
+        const headers = header ? injectAgentsTraceHeader(input.headers, header) : input.headers;
         const [startedPromise, resultPromise] = await next({ ...input, headers });
         resultPromise.finally(() => span.end()).catch(() => {});
         return [startedPromise, resultPromise];
@@ -181,6 +189,9 @@ export class OpenAIAgentsTraceOutboundInterceptor implements WorkflowOutboundCal
       }
     }
 
+    const header = currentAgentsSpanHeader();
+    if (!header) return next(input);
+    const headers = injectAgentsTraceHeader(input.headers, header);
     return next({ ...input, headers });
   }
 

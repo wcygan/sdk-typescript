@@ -26,7 +26,14 @@ export interface OpenAIAgentsPluginOptions {
    * Future versions may auto-propagate via workflow interceptors.
    */
   modelParams?: ModelActivityOptions;
-  /** Options for the agent trace context propagation interceptor. */
+  /**
+   * Options for the agent trace context propagation interceptor.
+   *
+   * Config surface only — users must still pass `addTemporalSpans` / `startTraces`
+   * to every `new TemporalOpenAIRunner(options)` in workflow code because the plugin
+   * only configures the activity-side interceptor; the workflow-side interceptor
+   * reads its config from the runner constructor.
+   */
   traceInterceptor?: OpenAIAgentsTraceInterceptorOptions;
 }
 
