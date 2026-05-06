@@ -2,10 +2,27 @@
 // eslint-disable-next-line import/no-unassigned-import
 import '@temporalio/openai-agents/lib/load-polyfills';
 
-import { Agent, handoff, tool, addTraceProcessor, type ModelResponse } from '@openai/agents-core';
+import {
+  Agent,
+  handoff,
+  tool,
+  addTraceProcessor,
+  getCurrentTrace,
+  withTrace,
+  type ModelResponse,
+} from '@openai/agents-core';
 import { z } from 'zod';
 import { webSearchTool } from '@openai/agents-openai';
-import { ApplicationFailure, proxyActivities, workflowInfo } from '@temporalio/workflow';
+import {
+  ApplicationFailure,
+  condition,
+  defineSignal,
+  executeChild,
+  proxyActivities,
+  setHandler,
+  startChild,
+  workflowInfo,
+} from '@temporalio/workflow';
 import {
   activityAsTool,
   TemporalOpenAIRunner,
@@ -1289,4 +1306,101 @@ export async function traceContextPropagationWorkflow(): Promise<{
   const activityTraceId = result.finalOutput?.replace('TRACE:', '') ?? '';
 
   return { workflowTraceId, activityTraceId };
+}
+
+// --- T5: Client→workflow trace context propagation ---
+
+export async function clientToWorkflowTraceWorkflow(): Promise<string> {
+  new TemporalOpenAIRunner();
+  return getCurrentTrace()?.traceId ?? 'NO_TRACE';
+}
+
+// --- T6: Signal trace context propagation ---
+
+const traceTestSignal = defineSignal('traceTestSignal');
+
+export async function signalTracePropagationParentWorkflow(): Promise<{
+  parentTraceId: string;
+  signalTraceId: string;
+}> {
+  new TemporalOpenAIRunner();
+
+  return withTrace('signal-trace-test', async (trace) => {
+    const parentTraceId = trace.traceId;
+    const handle = await startChild(signalTracePropagationChildWorkflow);
+    await handle.signal(traceTestSignal);
+    const signalTraceId = await handle.result();
+    return { parentTraceId, signalTraceId };
+  });
+}
+
+export async function signalTracePropagationChildWorkflow(): Promise<string> {
+  let capturedTraceId = '';
+  setHandler(traceTestSignal, () => {
+    capturedTraceId = getCurrentTrace()?.traceId ?? 'NO_SIGNAL_TRACE';
+  });
+  await condition(() => capturedTraceId !== '', '10 seconds');
+  return capturedTraceId;
+}
+
+// --- T7: Child workflow trace context propagation ---
+
+export async function childWorkflowTracePropagationParentWorkflow(): Promise<{
+  parentTraceId: string;
+  childTraceId: string;
+}> {
+  new TemporalOpenAIRunner();
+
+  return withTrace('child-trace-test', async (trace) => {
+    const parentTraceId = trace.traceId;
+    const childTraceId = await executeChild(childWorkflowTracePropagationChildWorkflow);
+    return { parentTraceId, childTraceId };
+  });
+}
+
+export async function childWorkflowTracePropagationChildWorkflow(): Promise<string> {
+  return getCurrentTrace()?.traceId ?? 'NO_TRACE';
+}
+
+// --- T8: Deterministic trace/span IDs and timestamps ---
+
+export async function deterministicTraceIdsWorkflow(): Promise<{
+  traceIds: string[];
+  spanIds: string[];
+  spanStartTimestamps: string[];
+  workflowTimestamp: string;
+}> {
+  const traceIds: string[] = [];
+  const spanIds: string[] = [];
+  const spanStartTimestamps: string[] = [];
+
+  // Capture Date-based timestamp — the V8 sandbox replaces Date with a
+  // deterministic clock. If this weren't deterministic, replay would fail
+  // with NondeterminismError because the command sequence would diverge.
+  const workflowTimestamp = new Date().toISOString();
+
+  const runner = new TemporalOpenAIRunner();
+
+  addTraceProcessor({
+    async onTraceStart(trace: any) {
+      traceIds.push(trace.traceId);
+    },
+    async onTraceEnd() {},
+    async onSpanStart(span: any) {
+      spanIds.push(span.spanId);
+      if (span.startedAt) spanStartTimestamps.push(span.startedAt);
+    },
+    async onSpanEnd() {},
+    async shutdown() {},
+    async forceFlush() {},
+  });
+
+  const agent = new Agent({
+    name: 'IdTestAgent',
+    instructions: 'Respond briefly.',
+    model: 'gpt-4o-mini',
+  });
+
+  await runner.run(agent, 'Hi');
+  return { traceIds, spanIds, spanStartTimestamps, workflowTimestamp };
 }

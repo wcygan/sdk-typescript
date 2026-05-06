@@ -1,22 +1,8 @@
-import {
-  Trace,
-  getCurrentTrace,
-  getGlobalTraceProvider,
-  withTrace,
-  setCurrentSpan,
-  type CustomSpanData,
-} from '@openai/agents-core';
+import { withCustomSpan } from '@openai/agents-core';
 import type { Context as ActivityContext } from '@temporalio/activity';
 import type { Next, ActivityInboundCallsInterceptor, ActivityExecuteInput } from '@temporalio/worker';
 import { extractAgentsTraceHeader } from '../common/trace-header';
-
-// Stable cross-package contract symbol from @openai/agents-core.
-// The library stores a single AsyncLocalStorage instance on globalThis under this
-// symbol to share trace context across duplicate package installations. If upstream
-// changes this symbol, this interceptor will silently stop propagating agent trace
-// context — but the symbol has been stable since the library's initial release and
-// is documented in source comments as an intentional dedup mechanism.
-const AGENTS_CORE_ALS_SYMBOL = Symbol.for('openai.agents.core.asyncLocalStorage');
+import { withRestoredAgentsTraceContext } from '../common/trace-context';
 
 export interface OpenAIAgentsTraceInterceptorOptions {
   /**
@@ -32,75 +18,54 @@ export interface OpenAIAgentsTraceInterceptorOptions {
    * Default: `false` (matches Python's `start_traces=False`).
    */
   startTraces?: boolean;
+
+  /**
+   * When `true` (default), wraps intercepted calls in `temporal:*` custom spans
+   * for Temporal-specific instrumentation (e.g. `temporal:executeActivity`).
+   * Set to `false` to disable these spans while keeping trace context propagation.
+   *
+   * Mirrors Python's `add_temporal_spans` parameter.
+   */
+  addTemporalSpans?: boolean;
 }
 
+/**
+ * Activity inbound interceptor that restores OpenAI Agents trace context
+ * from propagated headers and optionally wraps activity execution in a
+ * `temporal:executeActivity` span. Mirrors Python's
+ * `_ContextPropagationActivityInboundInterceptor`.
+ */
 export class OpenAIAgentsTraceActivityInboundInterceptor implements ActivityInboundCallsInterceptor {
+  private readonly ctx: ActivityContext;
+
   constructor(
-    _ctx: ActivityContext,
+    ctx: ActivityContext,
     private readonly options?: OpenAIAgentsTraceInterceptorOptions
-  ) {}
+  ) {
+    this.ctx = ctx;
+  }
 
   async execute(input: ActivityExecuteInput, next: Next<ActivityInboundCallsInterceptor, 'execute'>): Promise<unknown> {
     const header = extractAgentsTraceHeader(input.headers);
     if (!header?.traceId) return next(input);
 
-    if (this.options?.startTraces) {
-      return this.executeWithTraceEvents(header.traceId, header.traceName, header.spanId, input, next);
-    }
-    return this.executeWithContextOnly(header.traceId, header.traceName, header.spanId, input, next);
-  }
+    const addSpans = this.options?.addTemporalSpans !== false;
 
-  private async executeWithTraceEvents(
-    traceId: string,
-    traceName: string,
-    spanId: string | null,
-    input: ActivityExecuteInput,
-    next: Next<ActivityInboundCallsInterceptor, 'execute'>
-  ): Promise<unknown> {
-    const trace = getGlobalTraceProvider().createTrace({ traceId, name: traceName });
-    return withTrace(trace, async () => {
-      if (spanId) {
-        const span = getGlobalTraceProvider().createSpan<CustomSpanData>({
-          spanId,
-          data: { type: 'custom', name: '', data: {} },
-        });
-        span.start();
-        setCurrentSpan(span);
-        try {
-          return await next(input);
-        } finally {
-          span.end();
+    return withRestoredAgentsTraceContext(
+      header,
+      async () => {
+        if (addSpans) {
+          const info = this.ctx.info;
+          return withCustomSpan(() => next(input), {
+            data: {
+              name: 'temporal:executeActivity',
+              data: { activityId: info.activityId, activityType: info.activityType },
+            },
+          });
         }
-      }
-      return next(input);
-    });
-  }
-
-  private async executeWithContextOnly(
-    traceId: string,
-    traceName: string,
-    spanId: string | null,
-    input: ActivityExecuteInput,
-    next: Next<ActivityInboundCallsInterceptor, 'execute'>
-  ): Promise<unknown> {
-    // Force ALS initialization — @openai/agents-core lazily creates the
-    // AsyncLocalStorage instance on first call to getContextAsyncLocalStorage().
-    getCurrentTrace();
-
-    const als = (globalThis as any)[AGENTS_CORE_ALS_SYMBOL] as
-      | { run: <R>(store: unknown, callback: () => R) => R }
-      | undefined;
-    if (!als) return next(input);
-
-    const trace = new Trace({ traceId, name: traceName });
-    let span: unknown;
-    if (spanId) {
-      span = getGlobalTraceProvider().createSpan<CustomSpanData>(
-        { spanId, data: { type: 'custom', name: '', data: {} } },
-        trace
-      );
-    }
-
-    return als.run({ trace, span, active: true }, () => next(input));
+        return next(input);
+      },
+      { startTraces: this.options?.startTraces }
+    );
   }
 }

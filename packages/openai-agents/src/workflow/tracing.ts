@@ -6,8 +6,9 @@ import {
   type SpanData,
   addTraceProcessor,
   setTracingDisabled,
+  getGlobalTraceProvider,
 } from '@openai/agents-core';
-import { inWorkflowContext, workflowInfo } from '@temporalio/workflow';
+import { inWorkflowContext, workflowInfo, uuid4, log } from '@temporalio/workflow';
 
 // --- Existing public helpers (preserved) ---
 
@@ -24,6 +25,10 @@ export function isReplaying(): boolean {
 
 const TRACER_NAME = '@temporalio/openai-agents';
 const REGISTERED_KEY = Symbol.for('temporal-openai-agents-processor-registered');
+
+// Shared config symbol — read by workflow interceptors (trace-interceptor.ts)
+// to gate addTemporalSpans / startTraces behavior.
+const CONFIG_SYMBOL = Symbol.for('temporal-openai-agents-config');
 
 function spanNameFromData(data: SpanData): string {
   switch (data.type) {
@@ -113,34 +118,53 @@ export interface TemporalTracingProcessorOptions {
    * which spans differ between original execution and replay.
    */
   startSpansInReplay?: boolean;
+
+  /**
+   * When `true` (default), workflow/activity interceptors wrap calls in
+   * `temporal:*` custom spans for Temporal-specific instrumentation.
+   * Set to `false` to disable these spans while keeping trace propagation.
+   *
+   * Stored on `globalThis` so workflow interceptors (loaded via workflowModules)
+   * can read it without direct access to plugin options.
+   *
+   * Mirrors Python's `add_temporal_spans` parameter.
+   */
+  addTemporalSpans?: boolean;
+
+  /**
+   * When `true`, restored trace contexts fire processor events (`onTraceStart`,
+   * `onSpanStart`). When `false` (default), sets ALS context directly.
+   *
+   * Stored on `globalThis` for workflow interceptor access.
+   * Mirrors Python's `start_traces` parameter.
+   */
+  startTraces?: boolean;
 }
 
 /**
  * Bridges OpenAI Agents SDK trace events to OpenTelemetry spans.
  *
- * Requires @temporalio/interceptors-opentelemetry (or equivalent) to set up an OTel
- * tracer provider in the workflow sandbox. Without a registered provider,
- * otel.trace.getTracer() returns a no-op tracer and spans are silently discarded.
+ * Deterministic trace/span IDs are ensured via two layers:
+ * 1. **Explicit override** (primary): `installDeterministicTraceIds()` wraps
+ *    the upstream TraceProvider's `createTrace`/`createSpan` methods to inject
+ *    IDs from `workflow.uuid4()` — a per-workflow seeded PRNG. This is immune
+ *    to upstream changes in ID generation strategy.
+ * 2. **Polyfill** (belt-and-suspenders): `load-polyfills.ts` replaces
+ *    `crypto.randomUUID` with `uuid4()`. Catches any remaining `randomUUID`
+ *    calls from upstream that bypass the TraceProvider.
  *
- * Deterministic trace/span IDs are provided by the `crypto.randomUUID` polyfill in
- * `load-polyfills.ts`, which delegates to Temporal's `uuid4()` (per-workflow seeded
- * PRNG). Upstream `@openai/agents-core` calls `crypto.randomUUID()` internally for
- * ID generation, so IDs are automatically replay-safe without a custom TraceProvider.
- *
- * Agent trace context (traceId/spanId) propagation across the workflow→activity
- * boundary is handled by the `OpenAIAgentsTraceOutboundInterceptor` (workflow side)
- * and `OpenAIAgentsTraceActivityInboundInterceptor` (activity side), registered
- * automatically by `OpenAIAgentsPlugin`. These inject/extract the `__openai_span`
- * header so activity-side agent spans share the workflow's agent trace tree.
- *
- * OTel span nesting (separate concern) is handled by `@temporalio/interceptors-opentelemetry`
- * when configured. Without it, OTel activity spans appear at the workflow level.
+ * **Timestamps**: The Temporal V8 sandbox replaces `Date` with a deterministic
+ * clock. Upstream's only clock source is `timeIso()` in
+ * `@openai/agents-core/dist/tracing/utils.js`, which calls
+ * `new Date().toISOString()` — verified against v0.3.9. No `performance.now`,
+ * `hrtime`, or other clock APIs are used. If a future upstream version
+ * introduces a non-Date clock source, timestamps would diverge on replay
+ * and an explicit override (like `installDeterministicTraceIds` for IDs)
+ * would be needed.
  */
 export class TemporalTracingProcessor implements TracingProcessor {
   private readonly tracer: otel.Tracer;
   private readonly startSpansInReplay: boolean;
-  // Outer key: workflowId, inner key: spanId or traceId.
-  // Scoped per-workflow so concurrent workflows on the same worker don't share state.
   private readonly spans = new Map<string, Map<string, SpanEntry>>();
 
   constructor(options?: TemporalTracingProcessorOptions) {
@@ -253,31 +277,77 @@ export class TemporalTracingProcessor implements TracingProcessor {
   }
 }
 
+// --- Deterministic ID override ---
+
+const IDS_INSTALLED_KEY = Symbol.for('temporal-openai-agents-deterministic-ids');
+
+/**
+ * Wraps the upstream TraceProvider's `createTrace` and `createSpan` methods
+ * to inject deterministic IDs from `workflow.uuid4()`. This is the primary
+ * defense against replay non-determinism in trace/span IDs — the polyfill
+ * in `load-polyfills.ts` is a secondary safety net.
+ *
+ * Mirrors Python's approach of overriding `gen_trace_id`/`gen_span_id` on
+ * the trace provider.
+ */
+function installDeterministicTraceIds(): void {
+  if ((globalThis as any)[IDS_INSTALLED_KEY]) return;
+  (globalThis as any)[IDS_INSTALLED_KEY] = true;
+
+  const provider = getGlobalTraceProvider() as any;
+
+  const origCreateTrace = provider.createTrace.bind(provider);
+  provider.createTrace = (options: any) => {
+    return origCreateTrace({
+      ...options,
+      traceId: options.traceId ?? `trace_${uuid4().replace(/-/g, '')}`,
+    });
+  };
+
+  const origCreateSpan = provider.createSpan.bind(provider);
+  provider.createSpan = (options: any, parent?: any) => {
+    return origCreateSpan(
+      {
+        ...options,
+        spanId: options.spanId ?? `span_${uuid4().replace(/-/g, '').slice(0, 24)}`,
+      },
+      parent
+    );
+  };
+}
+
 /**
  * Appends a {@link TemporalTracingProcessor} to the OpenAI Agents SDK's
- * global processor list and enables tracing.
+ * global processor list, enables tracing, installs deterministic ID
+ * generation, and stores interceptor config on `globalThis`.
  *
- * **Side effect**: mutates the upstream `@openai/agents-core` global
- * `TraceProvider` (stored on `globalThis` via a well-known Symbol). A single
- * {@link TemporalTracingProcessor} instance is shared across all workflows in
- * the V8 isolate; per-workflow isolation is handled internally by the processor's
- * workflow-scoped span Map.
+ * **Side effects**:
+ * - Mutates the upstream TraceProvider (processor list + createTrace/createSpan)
+ * - Sets `globalThis[Symbol.for('temporal-openai-agents-config')]`
  *
- * Called automatically by the {@link TemporalOpenAIRunner} constructor — users
- * do not need to call this unless they need tracing without a runner instance.
+ * Called automatically by the {@link TemporalOpenAIRunner} constructor.
  *
- * Uses `addTraceProcessor` rather than `setTraceProcessors` so that any
- * processors registered by user code before runner construction are preserved.
- * The upstream `TraceProvider` starts with an empty processor list — no default
- * exporter is auto-registered — so there is no network-I/O risk from keeping
- * pre-existing processors.
- *
- * Idempotent — safe to call multiple times per isolate. Options from the first
- * call win; subsequent calls are no-ops regardless of options passed.
+ * Idempotent — first call wins. Subsequent calls with different options
+ * log a warning but are otherwise no-ops.
  */
 export function ensureTracingProcessorRegistered(options?: TemporalTracingProcessorOptions): void {
-  if ((globalThis as any)[REGISTERED_KEY]) return;
+  if ((globalThis as any)[REGISTERED_KEY]) {
+    if (options) {
+      log.warn(
+        'ensureTracingProcessorRegistered called again with options — first-call options win, this call ignored'
+      );
+    }
+    return;
+  }
   (globalThis as any)[REGISTERED_KEY] = true;
+
+  // Store interceptor config for workflow interceptors (loaded via workflowModules)
+  (globalThis as any)[CONFIG_SYMBOL] = {
+    addTemporalSpans: options?.addTemporalSpans,
+    startTraces: options?.startTraces,
+  };
+
   setTracingDisabled(false);
   addTraceProcessor(new TemporalTracingProcessor(options));
+  installDeterministicTraceIds();
 }

@@ -1,5 +1,6 @@
 import type { ModelProvider } from '@openai/agents-core';
 import { SimplePlugin } from '@temporalio/plugin';
+import { OpenAIAgentsTraceClientInterceptor } from '../client/trace-interceptor';
 import type { ModelActivityOptions } from '../common/model-activity-options';
 import { createModelActivity } from './activities';
 import type { StatelessMCPServerProvider } from './mcp-provider';
@@ -62,6 +63,13 @@ export class OpenAIAgentsPlugin extends SimplePlugin {
     super({
       name: 'OpenAIAgentsPlugin',
       activities: allActivities,
+      clientInterceptors: {
+        workflow: [
+          new OpenAIAgentsTraceClientInterceptor({
+            addTemporalSpans: traceInterceptorOptions?.addTemporalSpans,
+          }),
+        ],
+      },
       workerInterceptors: {
         workflowModules: [require.resolve('../workflow/trace-interceptor')],
         activity: [

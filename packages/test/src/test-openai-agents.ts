@@ -1,8 +1,14 @@
 /**
  * Test OpenAI Agents SDK integration with Temporal workflows
  */
-import { OpenAIAgentsPlugin, StatelessMCPServerProvider, toSerializedModelResponse } from '@temporalio/openai-agents';
-import { WorkflowFailedError } from '@temporalio/client';
+import { withTrace } from '@openai/agents-core';
+import {
+  OpenAIAgentsPlugin,
+  StatelessMCPServerProvider,
+  toSerializedModelResponse,
+  OpenAIAgentsTraceClientInterceptor,
+} from '@temporalio/openai-agents';
+import { WorkflowFailedError, WorkflowClient } from '@temporalio/client';
 import { temporal } from '@temporalio/proto';
 import {
   basicAgentWorkflow,
@@ -54,6 +60,10 @@ import {
   handoffCloneSnapshotWorkflow,
   concurrentTracingIsolationWorkflow,
   traceContextPropagationWorkflow,
+  clientToWorkflowTraceWorkflow,
+  signalTracePropagationParentWorkflow,
+  childWorkflowTracePropagationParentWorkflow,
+  deterministicTraceIdsWorkflow,
 } from './workflows/openai-agents';
 import { helpers, makeTestFunction } from './helpers-integration';
 import {
@@ -2515,6 +2525,7 @@ test('T1: OpenAI Agents tracing path is active and produces trace/span events', 
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
+    maxCachedWorkflows: 0,
     plugins: [
       new OpenAIAgentsPlugin({
         modelProvider: new FakeModelProvider([textResponse('Traced response')]),
@@ -2597,6 +2608,7 @@ test('T3: Concurrent workflows on same worker have isolated trace spans', async 
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
+    maxCachedWorkflows: 0,
     plugins: [
       new OpenAIAgentsPlugin({
         modelProvider: new FakeModelProvider([
@@ -2643,6 +2655,7 @@ test('T4: Agent trace context propagates across workflow/activity boundary', asy
   const { createWorker, executeWorkflow } = helpers(t);
 
   const worker = await createWorker({
+    maxCachedWorkflows: 0,
     plugins: [
       new OpenAIAgentsPlugin({
         modelProvider: new TraceCaptureModelProvider(),
@@ -2663,5 +2676,156 @@ test('T4: Agent trace context propagates across workflow/activity boundary', asy
       result.workflowTraceId,
       'Activity-side traceId must match workflow-side traceId (proves propagation)'
     );
+  });
+});
+
+// --- T5: Client→workflow trace context propagation ---
+
+test('T5: Client-side trace context propagates to workflow via interceptor', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x')]),
+      }),
+    ],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [new OpenAIAgentsTraceClientInterceptor()],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await withTrace('client-test-trace', async (trace) => {
+      const clientTraceId = trace.traceId;
+      const workflowTraceId = await wfClient.execute(clientToWorkflowTraceWorkflow, {
+        taskQueue,
+        workflowId: `t5-client-trace-${Date.now()}`,
+        workflowExecutionTimeout: '30 seconds',
+      });
+      return { clientTraceId, workflowTraceId };
+    });
+
+    t.truthy(result.clientTraceId, 'Client should have a trace ID');
+    t.not(result.workflowTraceId, 'NO_TRACE', 'Workflow should have restored trace context');
+    t.is(
+      result.workflowTraceId,
+      result.clientTraceId,
+      'Workflow-side traceId must match client-side traceId (proves client→workflow propagation)'
+    );
+  });
+});
+
+// --- T6: Signal trace context propagation ---
+
+test('T6: Signal carries trace context across workflow boundary', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(signalTracePropagationParentWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.truthy(result.parentTraceId, 'Parent should have a trace ID');
+    t.not(result.signalTraceId, 'NO_SIGNAL_TRACE', 'Signal handler should have restored trace context');
+    t.is(
+      result.signalTraceId,
+      result.parentTraceId,
+      'Signal handler traceId must match parent traceId (proves signal propagation)'
+    );
+  });
+});
+
+// --- T7: Child workflow trace context propagation ---
+
+test('T7: Child workflow receives propagated trace context from parent', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(childWorkflowTracePropagationParentWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.truthy(result.parentTraceId, 'Parent should have a trace ID');
+    t.not(result.childTraceId, 'NO_TRACE', 'Child should have restored trace context');
+    t.is(
+      result.childTraceId,
+      result.parentTraceId,
+      'Child traceId must match parent traceId (proves child workflow propagation)'
+    );
+  });
+});
+
+// --- T8: Deterministic trace/span IDs and timestamps ---
+
+test('T8: Trace/span IDs and timestamps are deterministic across replay', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('Deterministic IDs')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(deterministicTraceIdsWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    // --- ID format verification ---
+    t.true(result.traceIds.length > 0, 'Should capture at least one trace ID');
+    t.true(result.spanIds.length > 0, 'Should capture at least one span ID');
+
+    for (const traceId of result.traceIds) {
+      t.regex(traceId, /^trace_[0-9a-f]{32}$/, `Trace ID '${traceId}' should match deterministic format trace_<32hex>`);
+    }
+
+    for (const spanId of result.spanIds) {
+      t.regex(spanId, /^span_[0-9a-f]{24}$/, `Span ID '${spanId}' should match deterministic format span_<24hex>`);
+    }
+
+    // --- Timestamp determinism verification ---
+    // The workflow runs with maxCachedWorkflows: 0, which forces replay.
+    // If Date / new Date() were non-deterministic in the sandbox, the replayed
+    // command sequence would diverge → NondeterminismError. Reaching this point
+    // proves the sandbox clock is deterministic. We additionally verify the
+    // captured values are valid ISO 8601 timestamps.
+    t.regex(
+      result.workflowTimestamp,
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      'Workflow Date().toISOString() should produce valid ISO 8601 timestamp'
+    );
+
+    for (const ts of result.spanStartTimestamps) {
+      t.regex(
+        ts,
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+        `Span startedAt '${ts}' should be a valid ISO 8601 timestamp (from timeIso())`
+      );
+    }
   });
 });

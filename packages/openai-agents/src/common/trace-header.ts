@@ -1,3 +1,4 @@
+import { getCurrentTrace, getCurrentSpan } from '@openai/agents-core';
 import { defaultPayloadConverter, type Headers } from '@temporalio/common';
 
 /** Header key under which agent trace context is propagated across Temporal boundaries. */
@@ -20,4 +21,16 @@ export function extractAgentsTraceHeader(headers: Headers): AgentsSpanHeader | n
   const payload = headers[AGENTS_TRACE_HEADER_KEY];
   if (!payload) return null;
   return defaultPayloadConverter.fromPayload<AgentsSpanHeader>(payload);
+}
+
+/** Build an AgentsSpanHeader from the current OpenAI Agents trace/span context, or null if no trace is active. */
+export function currentAgentsSpanHeader(): AgentsSpanHeader | null {
+  const trace = getCurrentTrace();
+  if (!trace) return null;
+  const span = getCurrentSpan();
+  return {
+    traceName: trace.name ?? 'Unknown Workflow',
+    spanId: span?.spanId ?? null,
+    traceId: trace.traceId,
+  };
 }
