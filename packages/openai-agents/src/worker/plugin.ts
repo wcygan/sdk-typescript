@@ -3,6 +3,10 @@ import { SimplePlugin } from '@temporalio/plugin';
 import type { ModelActivityOptions } from '../common/model-activity-options';
 import { createModelActivity } from './activities';
 import type { StatelessMCPServerProvider } from './mcp-provider';
+import {
+  OpenAIAgentsTraceActivityInboundInterceptor,
+  type OpenAIAgentsTraceInterceptorOptions,
+} from './trace-interceptor';
 
 /**
  * Options for the OpenAI Agents plugin.
@@ -21,6 +25,8 @@ export interface OpenAIAgentsPluginOptions {
    * Future versions may auto-propagate via workflow interceptors.
    */
   modelParams?: ModelActivityOptions;
+  /** Options for the agent trace context propagation interceptor. */
+  traceInterceptor?: OpenAIAgentsTraceInterceptorOptions;
 }
 
 /**
@@ -51,9 +57,17 @@ export class OpenAIAgentsPlugin extends SimplePlugin {
       }
     }
 
+    const traceInterceptorOptions = options.traceInterceptor;
+
     super({
       name: 'OpenAIAgentsPlugin',
       activities: allActivities,
+      workerInterceptors: {
+        workflowModules: [require.resolve('../workflow/trace-interceptor')],
+        activity: [
+          (ctx) => ({ inbound: new OpenAIAgentsTraceActivityInboundInterceptor(ctx, traceInterceptorOptions) }),
+        ],
+      },
     });
   }
 }

@@ -35,5 +35,7 @@ export {
 } from './workflow/tracing';
 export type { TemporalTracingProcessorOptions } from './workflow/tracing';
 export type { TemporalOpenAIRunnerOptions } from './workflow/runner';
+export type { OpenAIAgentsTraceInterceptorOptions } from './worker/trace-interceptor';
+export { AGENTS_TRACE_HEADER_KEY, type AgentsSpanHeader } from './common/trace-header';
 
 export * as testing from './worker/testing';

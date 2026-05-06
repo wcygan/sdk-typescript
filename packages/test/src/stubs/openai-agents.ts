@@ -1,5 +1,6 @@
 import {
   Usage,
+  getCurrentTrace,
   type AgentOutputItem,
   type Model,
   type ModelProvider,
@@ -142,5 +143,40 @@ export class ThrowAnythingModelProvider implements ModelProvider {
 
   getModel(_name?: string): Model {
     return this.model;
+  }
+}
+
+/**
+ * A model that captures the current agent trace context during invocation and
+ * returns the traceId as the response text. Used for testing trace context
+ * propagation across the workflow→activity boundary.
+ */
+export class TraceCaptureModel implements Model {
+  async getResponse(_request: ModelRequest): Promise<ModelResponse> {
+    const traceId = getCurrentTrace()?.traceId ?? 'NO_TRACE';
+    const output: AgentOutputItem[] = [
+      {
+        type: 'message',
+        id: 'msg_trace_capture',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: `TRACE:${traceId}` }],
+        status: 'completed',
+      },
+    ];
+    return {
+      output,
+      usage: new Usage({ requests: 1, inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
+    };
+  }
+
+  // eslint-disable-next-line require-yield
+  async *getStreamedResponse(_request: ModelRequest): AsyncIterable<StreamEvent> {
+    throw new Error('Streaming not supported');
+  }
+}
+
+export class TraceCaptureModelProvider implements ModelProvider {
+  getModel(_name?: string): Model {
+    return new TraceCaptureModel();
   }
 }

@@ -52,6 +52,18 @@
       "import": "./lib/worker/testing.js",
       "require": "./lib/worker/testing.js",
       "default": "./lib/worker/testing.js"
+    },
+    "./workflow-interceptor": {
+      "types": "./lib/workflow/trace-interceptor.d.ts",
+      "import": "./lib/workflow/trace-interceptor.js",
+      "require": "./lib/workflow/trace-interceptor.js",
+      "default": "./lib/workflow/trace-interceptor.js"
+    },
+    "./lib/workflow/trace-interceptor": {
+      "types": "./lib/workflow/trace-interceptor.d.ts",
+      "import": "./lib/workflow/trace-interceptor.js",
+      "require": "./lib/workflow/trace-interceptor.js",
+      "default": "./lib/workflow/trace-interceptor.js"
     }
   },
   "keywords": [

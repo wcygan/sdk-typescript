@@ -53,6 +53,7 @@ import {
   replaySafetyWorkflow,
   handoffCloneSnapshotWorkflow,
   concurrentTracingIsolationWorkflow,
+  traceContextPropagationWorkflow,
 } from './workflows/openai-agents';
 import { helpers, makeTestFunction } from './helpers-integration';
 import {
@@ -61,6 +62,7 @@ import {
   RequestCapturingModelProvider,
   ModelNameCapturingModelProvider,
   ThrowAnythingModelProvider,
+  TraceCaptureModelProvider,
   textResponse,
   toolCallResponse,
   handoffResponse,
@@ -72,6 +74,7 @@ import EventType = temporal.api.enums.v1.EventType;
 
 const test = makeTestFunction({
   workflowsPath: require.resolve('./workflows/openai-agents'),
+  workflowInterceptorModules: [require.resolve('@temporalio/openai-agents/workflow-interceptor')],
 });
 
 test('Basic agent responds to prompt', async (t) => {
@@ -2631,5 +2634,34 @@ test('T3: Concurrent workflows on same worker have isolated trace spans', async 
     // No cross-pollination: trace IDs should be disjoint between the two workflows
     const sharedTraces = result1.traceIds.filter((id) => result2.traceIds.includes(id));
     t.is(sharedTraces.length, 0, 'No shared trace IDs between concurrent workflows');
+  });
+});
+
+// --- T4: Trace context propagation across workflow/activity boundary ---
+
+test('T4: Agent trace context propagates across workflow/activity boundary', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new TraceCaptureModelProvider(),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(traceContextPropagationWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.truthy(result.workflowTraceId, 'Workflow should have a traceId');
+    t.truthy(result.activityTraceId, 'Activity should capture a traceId');
+    t.not(result.activityTraceId, 'NO_TRACE', 'Activity should have propagated trace context');
+    t.is(
+      result.activityTraceId,
+      result.workflowTraceId,
+      'Activity-side traceId must match workflow-side traceId (proves propagation)'
+    );
   });
 });

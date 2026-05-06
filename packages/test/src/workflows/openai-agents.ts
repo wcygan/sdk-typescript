@@ -1257,3 +1257,36 @@ export async function concurrentTracingIsolationWorkflow(): Promise<{
 
   return capture;
 }
+
+// --- T4: Trace context propagation across workflow/activity boundary ---
+
+export async function traceContextPropagationWorkflow(): Promise<{
+  workflowTraceId: string;
+  activityTraceId: string;
+}> {
+  let workflowTraceId = '';
+
+  const runner = new TemporalOpenAIRunner();
+
+  addTraceProcessor({
+    async onTraceStart(trace: any) {
+      workflowTraceId = trace.traceId;
+    },
+    async onTraceEnd() {},
+    async onSpanStart() {},
+    async onSpanEnd() {},
+    async shutdown() {},
+    async forceFlush() {},
+  });
+
+  const agent = new Agent({
+    name: 'TracePropagationAgent',
+    instructions: 'You are a test agent.',
+    model: 'trace-capture-model',
+  });
+
+  const result = await runner.run(agent, 'Hello');
+  const activityTraceId = result.finalOutput?.replace('TRACE:', '') ?? '';
+
+  return { workflowTraceId, activityTraceId };
+}

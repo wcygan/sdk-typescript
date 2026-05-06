@@ -127,12 +127,14 @@ export interface TemporalTracingProcessorOptions {
  * PRNG). Upstream `@openai/agents-core` calls `crypto.randomUUID()` internally for
  * ID generation, so IDs are automatically replay-safe without a custom TraceProvider.
  *
- * Activity spans nest correctly under generation spans when
- * `@temporalio/interceptors-opentelemetry` is configured (recommended). The OTel
- * outbound interceptor injects the active span context into activity headers, and the
- * inbound interceptor extracts it so the activity span becomes a child of the
- * generation span. Without `interceptors-opentelemetry`, activity spans appear at
- * the workflow level rather than nested.
+ * Agent trace context (traceId/spanId) propagation across the workflow→activity
+ * boundary is handled by the `OpenAIAgentsTraceOutboundInterceptor` (workflow side)
+ * and `OpenAIAgentsTraceActivityInboundInterceptor` (activity side), registered
+ * automatically by `OpenAIAgentsPlugin`. These inject/extract the `__openai_span`
+ * header so activity-side agent spans share the workflow's agent trace tree.
+ *
+ * OTel span nesting (separate concern) is handled by `@temporalio/interceptors-opentelemetry`
+ * when configured. Without it, OTel activity spans appear at the workflow level.
  */
 export class TemporalTracingProcessor implements TracingProcessor {
   private readonly tracer: otel.Tracer;
