@@ -13,6 +13,7 @@ import type {
   WorkflowInboundCallsInterceptor,
   WorkflowOutboundCallsInterceptor,
 } from '@temporalio/workflow';
+import type { Headers } from '@temporalio/workflow';
 import { currentAgentsSpanHeader, extractAgentsTraceHeader, injectAgentsTraceHeader } from '../common/trace-header';
 import { withRestoredAgentsTraceContext, withRestoredAgentsTraceContextSync } from '../common/trace-context';
 
@@ -44,6 +45,40 @@ async function maybeTemporalSpan<T>(
     return withCustomSpan(fn, { data: { name: spanName, data: data ?? {} } });
   }
   return fn();
+}
+
+/**
+ * Guards on an active trace, optionally wraps in a temporal span, then injects
+ * the current agent trace/span header into the outbound input's headers and
+ * calls `next`.
+ *
+ * Returns `next(input)` unmodified when no agent trace is active.
+ *
+ * Header capture happens inside the optional temporal span callback so that when
+ * `addTemporalSpans` is enabled, the propagated spanId is the temporal span
+ * itself — the receiving side uses this spanId to derive its OTel parent.
+ *
+ * `currentAgentsSpanHeader()` is called without a null guard because it returns
+ * null only when `getCurrentTrace()` is null, which the outer guard already
+ * excludes.
+ */
+async function withInjectedHeader<I extends { headers: Headers }, T>(
+  input: I,
+  next: (i: I) => Promise<T>,
+  spanConfig?: { name: string; data?: Record<string, unknown> }
+): Promise<T> {
+  if (!getCurrentTrace()) return next(input);
+
+  const doInject = (): Promise<T> => {
+    const header = currentAgentsSpanHeader()!;
+    const headers = injectAgentsTraceHeader(input.headers, header);
+    return next({ ...input, headers });
+  };
+
+  if (spanConfig) {
+    return maybeTemporalSpan(spanConfig.name, doInject, spanConfig.data);
+  }
+  return doInject();
 }
 
 // --- Workflow Inbound Interceptor ---
@@ -129,41 +164,20 @@ export class OpenAIAgentsTraceOutboundInterceptor implements WorkflowOutboundCal
     input: ActivityInput,
     next: Next<WorkflowOutboundCallsInterceptor, 'scheduleActivity'>
   ): Promise<unknown> {
-    if (!getCurrentTrace()) return next(input);
-
-    // Header capture is inside the temporal span callback so that the
-    // propagated spanId is the `temporal:startActivity:*` span itself
-    // (when addTemporalSpans is enabled). The activity side uses this
-    // spanId to derive its OTel parent, nesting `temporal:executeActivity`
-    // under `temporal:startActivity:*` in the trace tree.
-    return maybeTemporalSpan(
-      `temporal:startActivity:${input.activityType}`,
-      () => {
-        const header = currentAgentsSpanHeader();
-        if (!header) return next(input);
-        const headers = injectAgentsTraceHeader(input.headers, header);
-        return next({ ...input, headers });
-      },
-      { activityType: input.activityType }
-    );
+    return withInjectedHeader(input, next, {
+      name: `temporal:startActivity:${input.activityType}`,
+      data: { activityType: input.activityType },
+    });
   }
 
   async scheduleLocalActivity(
     input: LocalActivityInput,
     next: Next<WorkflowOutboundCallsInterceptor, 'scheduleLocalActivity'>
   ): Promise<unknown> {
-    if (!getCurrentTrace()) return next(input);
-
-    return maybeTemporalSpan(
-      `temporal:startLocalActivity:${input.activityType}`,
-      () => {
-        const header = currentAgentsSpanHeader();
-        if (!header) return next(input);
-        const headers = injectAgentsTraceHeader(input.headers, header);
-        return next({ ...input, headers });
-      },
-      { activityType: input.activityType }
-    );
+    return withInjectedHeader(input, next, {
+      name: `temporal:startLocalActivity:${input.activityType}`,
+      data: { activityType: input.activityType },
+    });
   }
 
   async startChildWorkflowExecution(
@@ -172,15 +186,22 @@ export class OpenAIAgentsTraceOutboundInterceptor implements WorkflowOutboundCal
   ): Promise<[Promise<string>, Promise<unknown>]> {
     if (!getCurrentTrace()) return next(input);
 
+    // Header injection is shared between both branches — build the
+    // modified input once.
+    const header = currentAgentsSpanHeader()!;
+    const headers = injectAgentsTraceHeader(input.headers, header);
+    const injectedInput = { ...input, headers };
+
     if (shouldAddTemporalSpans()) {
+      // Manual createCustomSpan + start/end because withCustomSpan doesn't
+      // fit the [Promise<string>, Promise<unknown>] tuple return shape —
+      // the span must live across both promises.
       const span = createCustomSpan({
         data: { name: `temporal:startChildWorkflow:${input.workflowType}`, data: { workflowType: input.workflowType } },
       });
       span.start();
       try {
-        const header = currentAgentsSpanHeader();
-        const headers = header ? injectAgentsTraceHeader(input.headers, header) : input.headers;
-        const [startedPromise, resultPromise] = await next({ ...input, headers });
+        const [startedPromise, resultPromise] = await next(injectedInput);
         resultPromise.finally(() => span.end()).catch(() => {});
         return [startedPromise, resultPromise];
       } catch (e) {
@@ -189,22 +210,16 @@ export class OpenAIAgentsTraceOutboundInterceptor implements WorkflowOutboundCal
       }
     }
 
-    const header = currentAgentsSpanHeader();
-    if (!header) return next(input);
-    const headers = injectAgentsTraceHeader(input.headers, header);
-    return next({ ...input, headers });
+    return next(injectedInput);
   }
 
   async signalWorkflow(
     input: SignalWorkflowInput,
     next: Next<WorkflowOutboundCallsInterceptor, 'signalWorkflow'>
   ): Promise<void> {
-    const header = currentAgentsSpanHeader();
-    if (!header) return next(input);
-
-    const headers = injectAgentsTraceHeader(input.headers, header);
-    return maybeTemporalSpan('temporal:signalWorkflow', () => next({ ...input, headers }), {
-      signalName: input.signalName,
+    return withInjectedHeader(input, next, {
+      name: 'temporal:signalWorkflow',
+      data: { signalName: input.signalName },
     });
   }
 }
