@@ -5,8 +5,8 @@
  * OpenTelemetry spans: `onTraceStart`, `onTraceEnd`, `onSpanStart`,
  * `onSpanEnd`, `shutdown`, and `forceFlush`. Subclasses provide only
  * the storage primitives (`getEntry` / `setEntry` / `deleteEntry` /
- * `allEntries`) so that each environment can use the appropriate map
- * structure.
+ * `allEntries` / `clearAllEntries`) so that each environment can use
+ * the appropriate map structure.
  *
  * OTel trace/span IDs are derived deterministically from agent SDK IDs
  * using {@link agentTraceIdToOtelTraceId} and {@link agentSpanIdToOtelSpanId}.

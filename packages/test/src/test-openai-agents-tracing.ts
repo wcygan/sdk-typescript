@@ -12,6 +12,7 @@ import {
   StatelessMCPServerProvider,
   createTracerProvider,
   ReplaySafeTracerProvider,
+  TemporalIdGenerator,
 } from '@temporalio/openai-agents';
 import { DefaultLogger, Runtime, bundleWorkflowCode } from '@temporalio/worker';
 import {
@@ -20,6 +21,10 @@ import {
   tracingChildWorkflow,
   tracingChildWorkflowNoSpans,
   configIsolationWorkflow,
+  signalTraceParentWorkflow,
+  signalTraceChildWorkflow,
+  idempotencyFlagWorkflow,
+  traceContinueAsNewWorkflow,
 } from './workflows/openai-agents-tracing';
 import { FakeModelProvider, textResponse, toolCallResponse, handoffResponse } from './stubs/openai-agents';
 import * as agentActivities from './activities/openai-agents';
@@ -668,18 +673,19 @@ if (RUN_INTEGRATION_TESTS) {
       await Runtime._instance?.shutdown();
     }
   });
-  test.serial('multi-workflow config isolation under reuseV8Context', async (t) => {
-    // Guards against per-workflow plugin config leaking between workflows that
-    // share a V8 isolate. Before Item 21, plugin config was stored on
-    // globalThis, which silently leaked between concurrent workflows under
-    // `reuseV8Context: true`. With the per-workflow plugin-config-store, each
-    // workflow sees only its own config.
+  test.serial('multi-workflow config isolation under reuseV8Context (truly interleaved)', async (t) => {
+    // Strengthened version of the config isolation test (Item 34). The previous
+    // version ran A then B back-to-back, which lets a naive `clear-on-finish`
+    // implementation pass. This version is TRULY INTERLEAVED:
     //
-    // The test runs A and B CONCURRENTLY: A blocks on a signal while B runs to
-    // completion with a different config. After B completes, A is signaled to
-    // resume and read its own config. A naive single-variable implementation
-    // (`let currentConfig`) would fail because B's write overwrites A's value
-    // while A is still alive.
+    // 1. Start A (addTemporalSpans=true, waitForSignal=true) — it populates
+    //    its store and blocks on a signal.
+    // 2. Start B (addTemporalSpans=false, waitForSignal=false) — runs to
+    //    completion with different config.
+    // 3. Signal A to resume — A reads its config AFTER B has completed.
+    //
+    // A naive single-variable implementation (`let currentConfig`) would fail
+    // because B's write overwrites A's value while A is still alive.
     Runtime.install({});
     try {
       const agentsPlugin = new OpenAIAgentsPlugin({
@@ -707,7 +713,7 @@ if (RUN_INTEGRATION_TESTS) {
         });
 
         await worker.runUntil(async () => {
-          // Workflow A: addTemporalSpans = true, waits for signal before reading config
+          // Step 1: Start A (blocks on signal partway through)
           const handleA = await env.client.workflow.start(configIsolationWorkflow, {
             taskQueue,
             workflowId: `config-isolation-a-${uuid4()}`,
@@ -717,17 +723,19 @@ if (RUN_INTEGRATION_TESTS) {
           // Give A time to populate its store and block on the signal
           await new Promise((r) => setTimeout(r, 3000));
 
-          // Workflow B: addTemporalSpans = false, runs to completion immediately
+          // Step 2: Start B (different config), run to completion while A is alive
           const resultB = await env.client.workflow.execute(configIsolationWorkflow, {
             taskQueue,
             workflowId: `config-isolation-b-${uuid4()}`,
             args: [false, false], // addTemporalSpans=false, waitForSignal=false
           });
 
-          // B completed — now signal A to resume and read its config
+          // Step 3: Signal A to resume — A reads its config AFTER B completed
           await handleA.signal('proceed');
           const resultA = await handleA.result();
 
+          // Assertions: each workflow observed its OWN config, not the other's.
+          // A naive single-var impl would have B's `false` overwrite A's `true`.
           t.is(resultA, true, 'Workflow A should observe addTemporalSpans=true (not overwritten by B)');
           t.is(resultB, false, 'Workflow B should observe addTemporalSpans=false (not leaked from A)');
         });
@@ -738,7 +746,304 @@ if (RUN_INTEGRATION_TESTS) {
       await Runtime._instance?.shutdown();
     }
   });
+
+  // --- Item 26: workflow-to-workflow signalWorkflow trace propagation E2E ---
+
+  test.serial('signalWorkflow trace propagation: OTel spans nest correctly', async (t) => {
+    Runtime.install({});
+    try {
+      const otel = createOtelContext();
+      const agentsPlugin = new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x'), textResponse('x')]),
+        interceptorOptions: { addTemporalSpans: true },
+      });
+
+      const env = await createTestWorkflowEnvironment();
+      try {
+        const taskQueue = `signal-trace-e2e-${uuid4()}`;
+        const workflowBundle = await bundleWorkflowCode({
+          ...bundlerOptions,
+          workflowsPath: require.resolve('./workflows/openai-agents-tracing'),
+          plugins: [otel.otelPlugin, agentsPlugin],
+          logger: new DefaultLogger('WARN'),
+        });
+
+        const worker = await Worker.create({
+          connection: env.nativeConnection,
+          workflowBundle,
+          taskQueue,
+          activities: agentActivities,
+          plugins: [otel.otelPlugin, agentsPlugin],
+          maxCachedWorkflows: 0,
+        });
+
+        const result = await worker.runUntil(async () => {
+          return env.client.workflow.execute(signalTraceParentWorkflow, {
+            taskQueue,
+            workflowId: `signal-trace-e2e-${uuid4()}`,
+            workflowExecutionTimeout: '30 seconds',
+          });
+        });
+
+        // Agent-SDK-level assertion: trace IDs should match
+        t.truthy(result.parentTraceId, 'Parent should have a trace ID');
+        t.not(result.signalTraceId, 'NO_SIGNAL_TRACE', 'Signal handler should have restored trace context');
+        t.is(
+          result.signalTraceId,
+          result.parentTraceId,
+          'Signal handler traceId must match parent traceId (proves signal propagation)'
+        );
+
+        await otel.provider.shutdown();
+        otelApi.trace.disable();
+
+        // OTel span hierarchy assertion: the key spans should exist
+        const allNames = otel.spans.map((s) => s.name);
+        t.log('All OTel span names:', allNames);
+
+        // temporal:signalWorkflow should exist (from outbound interceptor)
+        t.true(
+          allNames.includes('temporal:signalWorkflow'),
+          `Should have temporal:signalWorkflow span, got: ${allNames.join(', ')}`
+        );
+
+        // temporal:handleSignal should exist (from inbound interceptor)
+        t.true(
+          allNames.includes('temporal:handleSignal'),
+          `Should have temporal:handleSignal span, got: ${allNames.join(', ')}`
+        );
+
+        // The handleSignal span should nest under signalWorkflow:
+        // find the signalWorkflow span and handleSignal span, verify parent-child
+        const signalSpan = otel.spans.find((s) => s.name === 'temporal:signalWorkflow');
+        const handleSpan = otel.spans.find((s) => s.name === 'temporal:handleSignal');
+
+        // Both spans are guaranteed to exist by the t.true() assertions above;
+        // use non-null assertions so a missing span throws instead of silently skipping.
+        const signalSpan_ = signalSpan!;
+        const handleSpan_ = handleSpan!;
+
+        // Both should be in the same OTel trace
+        t.is(
+          handleSpan_.spanContext().traceId,
+          signalSpan_.spanContext().traceId,
+          'handleSignal and signalWorkflow should share the same OTel trace ID'
+        );
+        t.is(
+          handleSpan_.parentSpanId,
+          signalSpan_.spanContext().spanId,
+          'handleSignal must nest directly under signalWorkflow'
+        );
+        t.log('signalWorkflow spanId:', signalSpan_.spanContext().spanId);
+        t.log('handleSignal parentSpanId:', handleSpan_.parentSpanId);
+      } finally {
+        await env.teardown();
+      }
+    } finally {
+      await Runtime._instance?.shutdown();
+    }
+  });
+
+  // --- Item 33: idempotency flag test under reuseV8Context ---
+
+  test.serial('ensure* idempotency: processor registered once across multiple workflows under reuseV8Context', async (t) => {
+    // Under reuseV8Context=true, the module-level idempotency flags
+    // (processorRegistered, deterministicIdsInstalled) persist across workflows
+    // sharing the same V8 isolate. If the flags weren't working, the processor
+    // would be registered twice, causing duplicate OTel spans for each agent event.
+    //
+    // The test runs two workflows back-to-back on the same worker, collects
+    // OTel spans, and asserts exact span counts match single-registration behavior.
+    Runtime.install({});
+    try {
+      const otel = createOtelContext();
+      const agentsPlugin = new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('done-a'), textResponse('done-b')]),
+        interceptorOptions: { addTemporalSpans: true },
+      });
+
+      const env = await createTestWorkflowEnvironment();
+      try {
+        const taskQueue = `idempotency-${uuid4()}`;
+        const workflowBundle = await bundleWorkflowCode({
+          ...bundlerOptions,
+          workflowsPath: require.resolve('./workflows/openai-agents-tracing'),
+          plugins: [otel.otelPlugin, agentsPlugin],
+          logger: new DefaultLogger('WARN'),
+        });
+
+        const worker = await Worker.create({
+          connection: env.nativeConnection,
+          workflowBundle,
+          taskQueue,
+          activities: agentActivities,
+          plugins: [otel.otelPlugin, agentsPlugin],
+          maxCachedWorkflows: 0,
+          reuseV8Context: true,
+        });
+
+        await worker.runUntil(async () => {
+          // Run two workflows back-to-back — they share the V8 isolate
+          const resultA = await env.client.workflow.execute(idempotencyFlagWorkflow, {
+            taskQueue,
+            workflowId: `idempotency-a-${uuid4()}`,
+            args: ['prompt-a'],
+            workflowExecutionTimeout: '30 seconds',
+          });
+          t.is(resultA, 'done-a');
+
+          const resultB = await env.client.workflow.execute(idempotencyFlagWorkflow, {
+            taskQueue,
+            workflowId: `idempotency-b-${uuid4()}`,
+            args: ['prompt-b'],
+            workflowExecutionTimeout: '30 seconds',
+          });
+          t.is(resultB, 'done-b');
+        });
+
+        await otel.provider.shutdown();
+        otelApi.trace.disable();
+
+        const allNames = otel.spans.map((s) => s.name);
+        t.log('All OTel span names for idempotency test:', allNames);
+
+        // Each workflow does exactly one runner.run() → one openai.agents.run span.
+        // If the processor were registered twice, each agent event would produce
+        // two OTel spans, doubling the count.
+        const agentRunCount = allNames.filter((n) => n === 'openai.agents.run').length;
+        t.is(agentRunCount, 2, 'Should have exactly 2 openai.agents.run spans (one per workflow, not doubled)');
+
+        // Each workflow's agent has one generation → one openai.agents.generation span.
+        const generationCount = allNames.filter((n) => n === 'openai.agents.generation').length;
+        t.is(generationCount, 2, 'Should have exactly 2 openai.agents.generation spans (one per workflow, not doubled)');
+
+        // Each generation triggers one invokeModelActivity → one temporal:startActivity span.
+        const startActivityCount = allNames.filter((n) => n === 'temporal:startActivity:invokeModelActivity').length;
+        t.is(startActivityCount, 2, 'Should have exactly 2 temporal:startActivity:invokeModelActivity spans (not doubled)');
+      } finally {
+        await env.teardown();
+      }
+    } finally {
+      await Runtime._instance?.shutdown();
+    }
+  });
+
+  // --- Item 35: agent trace context survives continueAsNew ---
+
+  test.serial('agent trace context survives continueAsNew', async (t) => {
+    Runtime.install({});
+    try {
+      const otel = createOtelContext();
+      const agentsPlugin = new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+        interceptorOptions: { addTemporalSpans: true },
+      });
+
+      const env = await createTestWorkflowEnvironment();
+      try {
+        const taskQueue = `trace-continue-as-new-${uuid4()}`;
+        const workflowBundle = await bundleWorkflowCode({
+          ...bundlerOptions,
+          workflowsPath: require.resolve('./workflows/openai-agents-tracing'),
+          plugins: [otel.otelPlugin, agentsPlugin],
+          logger: new DefaultLogger('WARN'),
+        });
+
+        const worker = await Worker.create({
+          connection: env.nativeConnection,
+          workflowBundle,
+          taskQueue,
+          activities: agentActivities,
+          plugins: [otel.otelPlugin, agentsPlugin],
+          maxCachedWorkflows: 0,
+        });
+
+        const result = await worker.runUntil(async () => {
+          return env.client.workflow.execute(traceContinueAsNewWorkflow, {
+            taskQueue,
+            workflowId: `trace-continue-as-new-${uuid4()}`,
+            args: [0], // Start at iteration 0
+            workflowExecutionTimeout: '30 seconds',
+          });
+        });
+
+        t.truthy(result.originalTraceId, 'Should have captured the original trace ID');
+        t.not(result.originalTraceId, 'NO_MEMO', 'Original trace ID should be available via memo');
+        t.not(result.continuedTraceId, 'NO_TRACE', 'Continued execution should have restored trace context');
+        t.is(
+          result.continuedTraceId,
+          result.originalTraceId,
+          'Trace ID must survive continueAsNew — proves __openai_span header propagation'
+        );
+
+        await otel.provider.shutdown();
+        otelApi.trace.disable();
+      } finally {
+        await env.teardown();
+      }
+    } finally {
+      await Runtime._instance?.shutdown();
+    }
+  });
 }
+
+// --- Unit tests: createTracerProvider (Item 29) ---
+
+test('createTracerProvider returns a ReplaySafeTracerProvider', (t) => {
+  const provider = createTracerProvider();
+  t.true(provider instanceof ReplaySafeTracerProvider, 'Returned provider should be instanceof ReplaySafeTracerProvider');
+});
+
+test('createTracerProvider exposes a TemporalIdGenerator', (t) => {
+  const provider = createTracerProvider();
+  t.true(
+    provider.temporalIdGenerator instanceof TemporalIdGenerator,
+    'temporalIdGenerator should be a TemporalIdGenerator instance'
+  );
+});
+
+test('createTracerProvider with default options uses library defaults', (t) => {
+  const provider = createTracerProvider();
+  t.truthy(provider.temporalIdGenerator, 'Should have a temporalIdGenerator');
+  // Verify it can generate IDs (fallback to randomHex)
+  const traceId = provider.temporalIdGenerator.generateTraceId();
+  t.is(traceId.length, 32, 'Default trace ID should be 32 hex chars');
+  const spanId = provider.temporalIdGenerator.generateSpanId();
+  t.is(spanId.length, 16, 'Default span ID should be 16 hex chars');
+});
+
+test('createTracerProvider wraps a custom idGenerator', (t) => {
+  const customTraceId = 'a'.repeat(32);
+  const customSpanId = 'b'.repeat(16);
+  const customGenerator = {
+    generateTraceId: () => customTraceId,
+    generateSpanId: () => customSpanId,
+  };
+
+  const provider = createTracerProvider({ idGenerator: customGenerator });
+  t.true(provider instanceof ReplaySafeTracerProvider);
+
+  // Without seeds, it should delegate to the custom generator
+  t.is(
+    provider.temporalIdGenerator.generateTraceId(),
+    customTraceId,
+    'Should delegate to custom generator when no seed is queued'
+  );
+  t.is(
+    provider.temporalIdGenerator.generateSpanId(),
+    customSpanId,
+    'Should delegate to custom generator when no seed is queued'
+  );
+
+  // With seeds, seeds take priority over the custom generator
+  const seededTraceId = 'c'.repeat(32);
+  provider.temporalIdGenerator.seedTraceId(seededTraceId);
+  t.is(
+    provider.temporalIdGenerator.generateTraceId(),
+    seededTraceId,
+    'Seeded trace ID should take priority over custom generator'
+  );
+});
 
 // --- Unit test: loud error when global provider is not ReplaySafeTracerProvider ---
 

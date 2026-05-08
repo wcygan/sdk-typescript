@@ -3,9 +3,11 @@ import '@temporalio/openai-agents/lib/load-polyfills';
 
 import {
   Agent,
+  getCurrentTrace,
   handoff,
   tool,
   setTracingDisabled,
+  withTrace,
   type InputGuardrail,
   type OutputGuardrail,
   type TextOutput,
@@ -20,9 +22,12 @@ import {
   defineSignal,
   defineUpdate,
   executeChild,
+  makeContinueAsNewFunc,
   proxyActivities,
   proxyLocalActivities,
   setHandler,
+  startChild,
+  workflowInfo,
 } from '@temporalio/workflow';
 import {
   activityAsTool,
@@ -306,4 +311,111 @@ export async function configIsolationWorkflow(
   // slot, this would return B's value instead of A's.
   const config = getCurrentPluginConfig();
   return config?.addTemporalSpans ?? false;
+}
+
+// --- Signal trace propagation E2E test workflows (Item 26) ---
+
+const signalTraceTestSignal = defineSignal('signalTraceTestSignal');
+const childReadyQuery = defineQuery<boolean>('childReady');
+
+/**
+ * Child workflow for signal trace propagation E2E test. Waits for a signal
+ * and captures the trace context visible in the signal handler.
+ */
+export async function signalTraceChildWorkflow(): Promise<string> {
+  // Initialize tracing so temporal:handleSignal spans are emitted
+  new TemporalOpenAIRunner({ addTemporalSpans: true });
+
+  let ready = false;
+  let signalTraceId = '';
+
+  setHandler(childReadyQuery, () => ready);
+  setHandler(signalTraceTestSignal, () => {
+    signalTraceId = getCurrentTrace()?.traceId ?? 'NO_SIGNAL_TRACE';
+  });
+
+  ready = true;
+  await condition(() => signalTraceId !== '', '30 seconds');
+  return signalTraceId;
+}
+
+/**
+ * Parent workflow for signal trace propagation E2E test. Starts a child
+ * workflow, waits for it to be ready, then signals it within an agent trace
+ * context. With addTemporalSpans=true, the outbound interceptor creates a
+ * `temporal:signalWorkflow` span, and the child's inbound interceptor
+ * creates a `temporal:handleSignal` span nested under the propagated trace.
+ */
+export async function signalTraceParentWorkflow(): Promise<{
+  parentTraceId: string;
+  signalTraceId: string;
+}> {
+  new TemporalOpenAIRunner({ addTemporalSpans: true });
+
+  const handle = await startChild(signalTraceChildWorkflow);
+
+  return withTrace('signal-e2e-test', async (trace) => {
+    const parentTraceId = trace.traceId;
+    await handle.signal(signalTraceTestSignal);
+    const signalTraceId = await handle.result();
+    return { parentTraceId, signalTraceId };
+  });
+}
+
+// --- Idempotency flag test workflow (Item 33) ---
+
+/**
+ * Simple workflow that constructs a TemporalOpenAIRunner (triggering
+ * ensureTracingProcessorRegistered) and runs a basic agent. Used by the
+ * idempotency flag test to verify that running two workflows on the same
+ * worker with reuseV8Context=true doesn't register the processor twice
+ * (which would cause duplicate OTel spans).
+ */
+export async function idempotencyFlagWorkflow(prompt: string): Promise<string> {
+  const runner = new TemporalOpenAIRunner({ addTemporalSpans: true });
+  const agent = new Agent({
+    name: 'IdempotencyTestAgent',
+    instructions: 'Respond briefly.',
+    model: 'gpt-4o-mini',
+  });
+  const result = await runner.run(agent, prompt);
+  return result.finalOutput ?? '';
+}
+
+// --- ContinueAsNew trace context test workflow (Item 35) ---
+
+/**
+ * ContinueAsNew trace context test: first run establishes a trace context
+ * via withTrace and calls continueAsNew. The second run reads getCurrentTrace()
+ * and returns the traceId. If the outbound continueAsNew interceptor correctly
+ * re-injects the __openai_span header, the continued execution's traceId
+ * should match the original.
+ */
+export async function traceContinueAsNewWorkflow(iteration: number): Promise<{
+  originalTraceId: string;
+  continuedTraceId: string;
+}> {
+  new TemporalOpenAIRunner({ addTemporalSpans: true });
+
+  if (iteration === 0) {
+    return withTrace('continue-as-new-trace-test', async (trace) => {
+      const originalTraceId = trace.traceId;
+      const doContinueAsNew = makeContinueAsNewFunc<typeof traceContinueAsNewWorkflow>({
+        memo: { originalTraceId },
+      });
+      await doContinueAsNew(1);
+      // Never reached — continueAsNew throws
+      return { originalTraceId: '', continuedTraceId: '' };
+    });
+  }
+
+  // Second run — trace context should be restored from the continueAsNew header
+  const continuedTrace = getCurrentTrace();
+  const continuedTraceId = continuedTrace?.traceId ?? 'NO_TRACE';
+
+  // Read the original trace ID from memo
+  const memo = workflowInfo().memo;
+  const originalTraceId = (memo?.originalTraceId as string) ?? 'NO_MEMO';
+
+  return { originalTraceId, continuedTraceId };
 }

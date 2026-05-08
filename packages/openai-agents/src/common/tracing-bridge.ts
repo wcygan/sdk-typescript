@@ -41,6 +41,13 @@ export function agentSpanIdToOtelSpanId(agentSpanId: string): string {
 /**
  * OTel `IdGenerator` that supports pre-seeding trace and span IDs.
  *
+ * This class **replaces** the OTel SDK's internal `_idGenerator` field on the
+ * tracer at install time (`(tracer as any)._idGenerator = idGen`). That
+ * replacement IS the workaround for the fact that `BasicTracerProvider` cannot
+ * be constructed inside the workflow V8 sandbox.
+ *
+ * @see {@link ../workflow/tracing.ts} for the sandbox-side tracing setup.
+ *
  * The agent SDK generates its own trace/span IDs (deterministically inside
  * a workflow). The plugin converts those to OTel-shaped IDs and seeds them
  * onto this generator before each `tracer.startSpan()` call. OTel's
@@ -50,7 +57,9 @@ export function agentSpanIdToOtelSpanId(agentSpanId: string): string {
  *
  * When no seed is queued, generation delegates to a wrapped `IdGenerator`
  * (typically a `RandomIdGenerator`). Pass the underlying generator at
- * construction time, or omit it to fall back to `randomHex`.
+ * construction time, or omit it to fall back to `randomHex`. The `randomHex`
+ * fallback is a safety net, not the primary path — on the instrumented
+ * workflow path every `startSpan` is preceded by a seed from the processor.
  */
 export class TemporalIdGenerator implements IdGenerator {
   private traceSeeds: string[] = [];

@@ -10,11 +10,11 @@ import type {
   SignalInput,
   QueryInput,
   UpdateInput,
+  Headers,
   WorkflowInterceptors,
   WorkflowInboundCallsInterceptor,
   WorkflowOutboundCallsInterceptor,
 } from '@temporalio/workflow';
-import type { Headers } from '@temporalio/workflow';
 import { workflowInfo } from '@temporalio/workflow';
 import { currentAgentsSpanHeader, extractAgentsTraceHeader, injectAgentsTraceHeader } from '../common/trace-header';
 import { extractAgentsConfigHeader, injectAgentsConfigHeader, CONFIG_WIRE_VERSION } from '../common/config-header';

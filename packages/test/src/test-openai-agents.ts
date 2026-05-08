@@ -81,6 +81,7 @@ import {
   statefulMcpNotConnectedWorkflow,
   statefulMcpIsolationWorkflow,
   statefulMcpHeartbeatTimeoutWorkflow,
+  statefulMcpSlowConnectHeartbeatWorkflow,
   statefulMcpReplayWorkflow,
   alsContextShapeSmokeCheckWorkflow,
   alsLeakDetectionWorkflow,
@@ -3030,6 +3031,61 @@ test('Stateful MCP: heartbeat timeout produces DedicatedWorkerFailure', async (t
 
     const result = await handle.result();
     t.is(result, 'DedicatedWorkerFailure: MCP Stateful Server Worker failed to heartbeat.');
+  });
+});
+
+test('Stateful MCP: slow connect heartbeat regression', async (t) => {
+  // Regression test (Item 31): the session activity heartbeats BEFORE
+  // server.connect() returns. Without the immediate heartbeat() call,
+  // a slow connect() would timeout because setInterval(heartbeat, 30_000)
+  // only fires at t=30s — too late for a short heartbeatTimeout.
+  const { createWorker, startWorkflow } = helpers(t);
+
+  let connectCallCount = 0;
+  const mcpProvider = new StatefulMCPServerProvider(
+    'slowConnectTest',
+    () => ({
+      async connect() {
+        connectCallCount++;
+        // Simulate a slow connection — 1.5 seconds
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      },
+      async cleanup() {},
+      async listTools() {
+        return [
+          {
+            name: 'dummy',
+            description: 'Dummy tool',
+            inputSchema: { type: 'object' as const, properties: {}, required: [] as string[], additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [];
+      },
+    }),
+    t.context.env.nativeConnection
+  );
+
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+        mcpServerProviders: [mcpProvider],
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const handle = await startWorkflow(statefulMcpSlowConnectHeartbeatWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    const result = await handle.result();
+    // The workflow should succeed — the immediate heartbeat prevents
+    // the session activity from timing out during the slow connect.
+    t.regex(result, /^connected:/, `Expected connected:N result, got: ${result}`);
+    t.true(connectCallCount > 0, 'connect() should have been called');
   });
 });
 

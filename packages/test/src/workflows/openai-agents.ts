@@ -1470,6 +1470,37 @@ export async function statefulMcpHeartbeatTimeoutWorkflow(): Promise<string> {
 }
 
 /**
+ * Workflow for testing that the session activity heartbeats during a slow
+ * server.connect(). Uses serverSessionConfig.heartbeatTimeout so the
+ * timeout applies to the long-running session activity itself, not the
+ * operation activities.
+ *
+ * The server's connect() blocks for ~1.5s. With a 3s heartbeatTimeout on
+ * the session config, the heartbeat mechanism must fire during connect()
+ * to prevent the timeout. After connect() completes, the workflow calls
+ * listTools and cleans up normally.
+ */
+export async function statefulMcpSlowConnectHeartbeatWorkflow(): Promise<string> {
+  const server = statefulMcpServer('slowConnectTest', {
+    serverSessionConfig: {
+      heartbeatTimeout: '3 seconds',
+      startToCloseTimeout: '30 seconds',
+    },
+    config: {
+      startToCloseTimeout: '10 seconds',
+    },
+  });
+
+  await server.connect();
+  try {
+    const tools = await server.listTools();
+    return `connected:${tools.length}`;
+  } finally {
+    await server.cleanup();
+  }
+}
+
+/**
  * Workflow for replay-safety testing with maxCachedWorkflows: 0.
  * Connects to a stateful MCP server, calls a tool, cleans up, and returns.
  * The per-run task queue name is deterministic (based on runId), so replay

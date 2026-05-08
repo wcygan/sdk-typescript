@@ -148,12 +148,14 @@ export class StatefulMCPServerProvider {
       const info = activityInfo();
       const sid = `${this._name}@${info.workflowExecution.runId}`;
 
-      // Heartbeat immediately so slow server.connect() doesn't cause a heartbeat timeout
+      // Heartbeat immediately so slow server.connect() doesn't cause a heartbeat timeout,
+      // then continue heartbeating every 30s while the session is alive.
       const heartbeatInterval = setInterval(() => {
         heartbeat();
       }, 30_000);
 
       try {
+        heartbeat();
         if (this._servers.has(sid)) {
           throw ApplicationFailure.create({
             message:

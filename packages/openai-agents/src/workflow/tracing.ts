@@ -55,11 +55,17 @@ export class TemporalTracingProcessor extends BaseAgentTracingProcessor {
   private readonly spans = new Map<string, Map<string, SpanEntry>>();
 
   constructor() {
-    // The workflow V8 sandbox does not bundle `@opentelemetry/sdk-trace-base`'s
-    // `BasicTracerProvider`, so a `ReplaySafeTracerProvider` cannot be
-    // constructed here. Instead, write the generator directly onto the
-    // tracer's internal `_idGenerator` field — the same field
-    // `BasicTracerProvider` uses on the host side.
+    // The workflow V8 sandbox cannot import `@opentelemetry/sdk-trace-base`'s
+    // `BasicTracerProvider`: the transitive dependency `@opentelemetry/core`
+    // references the global `performance` object in its browser platform shim
+    // (`platform/browser/performance.ts`), which does not exist in Temporal's
+    // V8 sandbox, causing a `ReferenceError: performance is not defined` at
+    // workflow module-load time.
+    //
+    // WARNING: Writing to a private OTel SDK field. If `BasicTracerProvider`
+    // restructures or renames `_idGenerator` in a future major, this breaks
+    // silently and traces fragment without erroring. Revisit if bundling of
+    // `BasicTracerProvider` becomes possible in the workflow sandbox.
     const idGen = new TemporalIdGenerator();
     super(idGen);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
