@@ -13,11 +13,13 @@ import {
   type TracingConfig,
 } from '@openai/agents-core';
 import { ApplicationFailure } from '@temporalio/common';
+import { workflowInfo } from '@temporalio/workflow';
 import { DEFAULT_MODEL_ACTIVITY_OPTIONS, type ModelActivityOptions } from '../common/model-activity-options';
 import { unwrapTemporalFailure } from '../common/errors';
 import { PlaceholderModelProvider } from './dummy-model-provider';
 import { convertAgent } from './convert-agent';
 import { ensureTracingProcessorRegistered } from './tracing';
+import { getOriginalPluginConfig, setPluginConfig } from './plugin-config-store';
 
 export interface TemporalRunOptions<TContext = undefined> {
   /** Run context passed to agents and tools */
@@ -65,11 +67,35 @@ export interface TemporalRunOptions<TContext = undefined> {
   };
 }
 
-export interface TemporalOpenAIRunnerOptions extends ModelActivityOptions {
+export interface TemporalOpenAIRunnerOptions {
+  /**
+   * Model activity options (timeouts, retry, task queue, etc.).
+   * Overrides per-field any `modelParams` propagated from the plugin via header.
+   * When omitted, defaults are merged from the *original* plugin config
+   * (header-injected by the plugin client interceptor on workflow start).
+   * Subsequent `TemporalOpenAIRunner` constructions in the same workflow do not
+   * inherit overrides from earlier ones — the original config is the merge base.
+   *
+   * **Merge is shallow** (object spread): a runner-level
+   * `retryPolicy: { initialInterval: '1s' }` *replaces* a plugin-level
+   * `retryPolicy: { maximumAttempts: 5 }` rather than deep-merging the two.
+   * This matches Temporal SDK convention for activity options.
+   *
+   * Unlike the plugin-side `modelParams` ({@link SerializableModelActivityOptions}),
+   * the runner accepts the full {@link ModelActivityOptions} — including the
+   * function form `summaryOverride: ModelSummaryProvider`. This is the documented
+   * escape hatch for dynamic summaries that need workflow-local context.
+   * See {@link OpenAIAgentsPluginOptions.modelParams} and
+   * {@link OpenAIAgentsTraceClientInterceptorOptions.modelParams} for the
+   * serializable (plugin-side) counterpart.
+   */
+  modelParams?: ModelActivityOptions;
+
   /**
    * When `true`, workflow/activity interceptors wrap calls in
    * `temporal:*` custom spans for Temporal-specific instrumentation.
    * Set to `false` (default) to disable these spans while keeping trace propagation.
+   * Overrides the plugin's `interceptorOptions.addTemporalSpans` for this workflow.
    *
    * Default: `false`.
    */
@@ -78,6 +104,7 @@ export interface TemporalOpenAIRunnerOptions extends ModelActivityOptions {
   /**
    * When `true`, restored trace contexts fire processor events (`onTraceStart`,
    * `onSpanStart`). When `false` (default), sets ALS context directly.
+   * Overrides the plugin's `interceptorOptions.startTraces` for this workflow.
    */
   startTraces?: boolean;
 }
@@ -92,9 +119,30 @@ export class TemporalOpenAIRunner {
   private readonly modelParams: ModelActivityOptions;
 
   constructor(options?: TemporalOpenAIRunnerOptions) {
-    const { addTemporalSpans, startTraces, ...modelParams } = options ?? {};
-    this.modelParams = { ...DEFAULT_MODEL_ACTIVITY_OPTIONS, ...modelParams };
-    ensureTracingProcessorRegistered({ addTemporalSpans, startTraces });
+    // Register the tracing processor idempotently (no options — config lives in the store)
+    ensureTracingProcessorRegistered();
+
+    // Merge config: runner constructor args > original header config > defaults.
+    // Reads from the *original* config (set once by the inbound interceptor),
+    // NOT the effective config (which may have been overwritten by a prior
+    // runner construction). This prevents modelParams accumulation across
+    // multiple `new TemporalOpenAIRunner(...)` calls in the same workflow.
+    const wfId = workflowInfo().workflowId;
+    const fromOriginal = getOriginalPluginConfig(wfId);
+
+    const mergedModelParams: ModelActivityOptions = {
+      ...DEFAULT_MODEL_ACTIVITY_OPTIONS,
+      ...fromOriginal?.modelParams,
+      ...options?.modelParams,
+    };
+
+    setPluginConfig(wfId, {
+      addTemporalSpans: options?.addTemporalSpans ?? fromOriginal?.addTemporalSpans ?? false,
+      startTraces: options?.startTraces ?? fromOriginal?.startTraces ?? false,
+      modelParams: mergedModelParams,
+    });
+
+    this.modelParams = mergedModelParams;
   }
 
   /**

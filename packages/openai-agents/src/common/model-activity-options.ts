@@ -35,6 +35,34 @@ export interface ModelActivityOptions {
   priority?: Priority;
 }
 
+/**
+ * Plugin-side model activity options that are propagated to workflows via the
+ * `__openai_agents_config` header (JSON-serialized). The function form of
+ * `summaryOverride` ({@link ModelSummaryProvider}) is excluded here because
+ * functions cannot survive serialization.
+ *
+ * To pass a `ModelSummaryProvider` (closure/function form), use the runner
+ * constructor in workflow code instead:
+ * ```ts
+ * new TemporalOpenAIRunner({ modelParams: { summaryOverride: provider } })
+ * ```
+ */
+export type SerializableModelActivityOptions = Omit<ModelActivityOptions, 'summaryOverride'> & {
+  /**
+   * Static summary string used as a tracing summary override.
+   *
+   * The function form of `summaryOverride: ModelSummaryProvider` is NOT
+   * accepted here because plugin-side `modelParams` is propagated to
+   * workflows via the `__openai_agents_config` header (JSON-serialized) —
+   * functions cannot survive serialization.
+   *
+   * To pass a `ModelSummaryProvider` (closure/function form), use the
+   * runner constructor in workflow code instead:
+   * `new TemporalOpenAIRunner({ modelParams: { summaryOverride: provider } })`.
+   */
+  summaryOverride?: string;
+};
+
 export const DEFAULT_MODEL_ACTIVITY_OPTIONS: ModelActivityOptions = {
   startToCloseTimeout: '60s',
   useLocalActivity: false,

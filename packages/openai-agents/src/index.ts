@@ -3,7 +3,7 @@
  */
 
 export { OpenAIAgentsPlugin } from './worker/plugin';
-export type { OpenAIAgentsPluginOptions, MCPServerProvider } from './worker/plugin';
+export type { OpenAIAgentsPluginOptions, OpenAIAgentsPluginInterceptorOptions, MCPServerProvider } from './worker/plugin';
 export { toSerializedModelResponse } from './worker/activities';
 export { StatelessMCPServerProvider } from './worker/mcp-provider';
 export type { StatelessMCPServerFactory, MCPToolDefinition, MCPCallToolResult } from './worker/mcp-provider';
@@ -16,7 +16,12 @@ export {
   type InvokeModelActivityInput,
   type JsonValue,
 } from './common/serialized-model';
-export type { ModelActivityOptions, ModelSummaryProvider, AgentInputItem } from './common/model-activity-options';
+export type {
+  ModelActivityOptions,
+  SerializableModelActivityOptions,
+  ModelSummaryProvider,
+  AgentInputItem,
+} from './common/model-activity-options';
 export { DEFAULT_MODEL_ACTIVITY_OPTIONS } from './common/model-activity-options';
 export { ToolSerializationError } from './workflow/tools';
 export type { ActivityToolDefinition, ActivityAsToolOptions, JsonObjectSchema } from './workflow/tools';
@@ -33,12 +38,12 @@ export {
   TemporalTracingProcessor,
   ensureTracingProcessorRegistered,
 } from './workflow/tracing';
-export type { TemporalTracingProcessorOptions } from './workflow/tracing';
 export type { TemporalOpenAIRunnerOptions } from './workflow/runner';
 export type { OpenAIAgentsTraceInterceptorOptions } from './worker/trace-interceptor';
 export { OpenAIAgentsTraceClientInterceptor } from './client/trace-interceptor';
 export type { OpenAIAgentsTraceClientInterceptorOptions } from './client/trace-interceptor';
 export { AGENTS_TRACE_HEADER_KEY, type AgentsSpanHeader } from './common/trace-header';
+export { AGENTS_CONFIG_HEADER_KEY, CONFIG_WIRE_VERSION, type AgentsConfigHeader } from './common/config-header';
 
 export { createTracerProvider, ReplaySafeTracerProvider } from './tracer-provider';
 export type { CreateTracerProviderOptions } from './tracer-provider';

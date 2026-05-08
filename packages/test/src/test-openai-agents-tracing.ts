@@ -19,6 +19,7 @@ import {
   comprehensiveAgentWorkflowNoSpans,
   tracingChildWorkflow,
   tracingChildWorkflowNoSpans,
+  configIsolationWorkflow,
 } from './workflows/openai-agents-tracing';
 import { FakeModelProvider, textResponse, toolCallResponse, handoffResponse } from './stubs/openai-agents';
 import * as agentActivities from './activities/openai-agents';
@@ -444,7 +445,7 @@ if (RUN_INTEGRATION_TESTS) {
       const agentsPlugin = new OpenAIAgentsPlugin({
         modelProvider: new FakeModelProvider(() => comprehensiveResponses()),
         mcpServerProviders: [mcpProvider],
-        traceInterceptor: { addTemporalSpans: true },
+        interceptorOptions: { addTemporalSpans: true },
       });
 
       const env = await createTestWorkflowEnvironment();
@@ -491,7 +492,7 @@ if (RUN_INTEGRATION_TESTS) {
         const agentsPlugin2 = new OpenAIAgentsPlugin({
           modelProvider: new FakeModelProvider(() => comprehensiveResponses()),
           mcpServerProviders: [createMcpProvider()],
-          traceInterceptor: { addTemporalSpans: true },
+          interceptorOptions: { addTemporalSpans: true },
         });
         const worker2 = await Worker.create({
           connection: env.nativeConnection,
@@ -660,6 +661,76 @@ if (RUN_INTEGRATION_TESTS) {
         // since they're from the SDK's OTel interceptor, not the agent interceptor)
         const agentTemporalSpans = otel.spans.map((s) => s.name).filter((n) => n.startsWith('temporal:'));
         t.is(agentTemporalSpans.length, 0, `Should have no temporal:* agent spans, got: ${agentTemporalSpans.join(', ')}`);
+      } finally {
+        await env.teardown();
+      }
+    } finally {
+      await Runtime._instance?.shutdown();
+    }
+  });
+  test.serial('multi-workflow config isolation under reuseV8Context', async (t) => {
+    // Guards against per-workflow plugin config leaking between workflows that
+    // share a V8 isolate. Before Item 21, plugin config was stored on
+    // globalThis, which silently leaked between concurrent workflows under
+    // `reuseV8Context: true`. With the per-workflow plugin-config-store, each
+    // workflow sees only its own config.
+    //
+    // The test runs A and B CONCURRENTLY: A blocks on a signal while B runs to
+    // completion with a different config. After B completes, A is signaled to
+    // resume and read its own config. A naive single-variable implementation
+    // (`let currentConfig`) would fail because B's write overwrites A's value
+    // while A is still alive.
+    Runtime.install({});
+    try {
+      const agentsPlugin = new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+      });
+
+      const env = await createTestWorkflowEnvironment();
+      try {
+        const taskQueue = `config-isolation-${uuid4()}`;
+        const workflowBundle = await bundleWorkflowCode({
+          ...bundlerOptions,
+          workflowsPath: require.resolve('./workflows/openai-agents-tracing'),
+          plugins: [agentsPlugin],
+          logger: new DefaultLogger('WARN'),
+        });
+
+        const worker = await Worker.create({
+          connection: env.nativeConnection,
+          workflowBundle,
+          taskQueue,
+          activities: agentActivities,
+          plugins: [agentsPlugin],
+          maxCachedWorkflows: 0,
+          reuseV8Context: true,
+        });
+
+        await worker.runUntil(async () => {
+          // Workflow A: addTemporalSpans = true, waits for signal before reading config
+          const handleA = await env.client.workflow.start(configIsolationWorkflow, {
+            taskQueue,
+            workflowId: `config-isolation-a-${uuid4()}`,
+            args: [true, true], // addTemporalSpans=true, waitForSignal=true
+          });
+
+          // Give A time to populate its store and block on the signal
+          await new Promise((r) => setTimeout(r, 3000));
+
+          // Workflow B: addTemporalSpans = false, runs to completion immediately
+          const resultB = await env.client.workflow.execute(configIsolationWorkflow, {
+            taskQueue,
+            workflowId: `config-isolation-b-${uuid4()}`,
+            args: [false, false], // addTemporalSpans=false, waitForSignal=false
+          });
+
+          // B completed — now signal A to resume and read its config
+          await handleA.signal('proceed');
+          const resultA = await handleA.result();
+
+          t.is(resultA, true, 'Workflow A should observe addTemporalSpans=true (not overwritten by B)');
+          t.is(resultB, false, 'Workflow B should observe addTemporalSpans=false (not leaked from A)');
+        });
       } finally {
         await env.teardown();
       }

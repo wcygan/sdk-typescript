@@ -28,6 +28,7 @@ import {
   activityAsTool,
   TemporalOpenAIRunner,
   statelessMcpServer,
+  getCurrentPluginConfig,
 } from '@temporalio/openai-agents/lib/workflow';
 import type * as activities from '../activities/openai-agents';
 
@@ -268,4 +269,41 @@ export async function comprehensiveAgentWorkflow(prompt: string): Promise<string
 
 export async function comprehensiveAgentWorkflowNoSpans(prompt: string): Promise<string> {
   return runComprehensive(prompt, false);
+}
+
+// --- Multi-workflow config isolation test workflow ---
+
+const proceedSignal = defineSignal<[]>('proceed');
+
+/**
+ * Guards against per-workflow plugin config leaking between workflows that
+ * share a V8 isolate. Before Item 21, plugin config was stored on globalThis,
+ * which silently leaked between concurrent workflows under `reuseV8Context:
+ * true`. With the per-workflow plugin-config-store, each workflow sees only
+ * its own config.
+ *
+ * When `waitForSignal` is true, the workflow blocks on the `proceed` signal
+ * after populating the store, enabling the test to verify that a concurrent
+ * workflow B (with different config) does not overwrite A's config while A
+ * is still alive.
+ */
+export async function configIsolationWorkflow(
+  addTemporalSpans: boolean,
+  waitForSignal?: boolean
+): Promise<boolean> {
+  // Constructing the runner populates the per-workflow store
+  new TemporalOpenAIRunner({ addTemporalSpans });
+
+  if (waitForSignal) {
+    let proceed = false;
+    setHandler(proceedSignal, () => {
+      proceed = true;
+    });
+    await condition(() => proceed, '30 seconds');
+  }
+
+  // Read config AFTER the signal wait — if B's config leaked into A's store
+  // slot, this would return B's value instead of A's.
+  const config = getCurrentPluginConfig();
+  return config?.addTemporalSpans ?? false;
 }

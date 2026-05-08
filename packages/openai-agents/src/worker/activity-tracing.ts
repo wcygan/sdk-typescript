@@ -46,7 +46,9 @@ class ActivityTracingProcessor extends BaseAgentTracingProcessor {
   }
 }
 
-const ACTIVITY_REGISTERED_KEY = Symbol.for('temporal-openai-agents-activity-processor-registered');
+// Module-level idempotency flag — replaces the previous
+// `globalThis[Symbol.for('temporal-openai-agents-activity-processor-registered')]`.
+let activityProcessorRegistered = false;
 
 /**
  * Registers an {@link ActivityTracingProcessor} on the activity-process global
@@ -57,8 +59,8 @@ const ACTIVITY_REGISTERED_KEY = Symbol.for('temporal-openai-agents-activity-proc
  * OTel spans via the registered processor.
  */
 export function ensureActivityTracingProcessorRegistered(): void {
-  if ((globalThis as any)[ACTIVITY_REGISTERED_KEY]) return;
-  (globalThis as any)[ACTIVITY_REGISTERED_KEY] = true;
+  if (activityProcessorRegistered) return;
+  activityProcessorRegistered = true;
 
   addTraceProcessor(new ActivityTracingProcessor());
 }

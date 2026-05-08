@@ -22,9 +22,11 @@ export interface OpenAIAgentsTraceInterceptorOptions {
    * Set to `false` (default) to disable these spans while keeping trace
    * context propagation.
    *
-   * These options also need to be passed to every `new TemporalOpenAIRunner(...)`
-   * in your workflows — the plugin only configures the activity-side interceptor;
-   * the workflow-side interceptor reads its config from the runner constructor.
+   * The plugin propagates this value to workflows automatically via the
+   * `__openai_agents_config` header. The workflow-side interceptor reads
+   * its config from the per-workflow plugin-config-store (populated by the
+   * inbound interceptor on header extraction). The runner constructor can
+   * override this per-workflow if needed.
    *
    * Default: `false`.
    */

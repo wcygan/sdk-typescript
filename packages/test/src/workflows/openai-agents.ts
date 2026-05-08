@@ -21,8 +21,10 @@ import { webSearchTool } from '@openai/agents-openai';
 import {
   ApplicationFailure,
   condition,
+  continueAsNew,
   defineQuery,
   defineSignal,
+  defineUpdate,
   executeChild,
   proxyActivities,
   setHandler,
@@ -37,6 +39,7 @@ import {
   StatefulMCPServerReference,
   isInWorkflow,
   isReplaying,
+  getCurrentPluginConfig,
   toSerializedModelRequest,
   type TemporalMCPServer,
 } from '@temporalio/openai-agents/lib/workflow';
@@ -251,7 +254,7 @@ export async function localActivityAgentWorkflow(prompt: string): Promise<string
     model: 'gpt-4o-mini',
   });
 
-  const runner = new TemporalOpenAIRunner({ useLocalActivity: true, startToCloseTimeout: '60s' });
+  const runner = new TemporalOpenAIRunner({ modelParams: { useLocalActivity: true, startToCloseTimeout: '60s' } });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
 }
@@ -269,8 +272,7 @@ export async function retryableModelWorkflow(prompt: string): Promise<string> {
   });
 
   const runner = new TemporalOpenAIRunner({
-    startToCloseTimeout: '10s',
-    retryPolicy: { maximumAttempts: 3, initialInterval: '100ms' },
+    modelParams: { startToCloseTimeout: '10s', retryPolicy: { maximumAttempts: 3, initialInterval: '100ms' } },
   });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
@@ -662,7 +664,7 @@ export async function summaryOverrideStringWorkflow(prompt: string): Promise<str
   });
 
   const runner = new TemporalOpenAIRunner({
-    summaryOverride: 'Custom model summary',
+    modelParams: { summaryOverride: 'Custom model summary' },
   });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
@@ -890,8 +892,7 @@ export async function timeoutErrorWorkflow(prompt: string): Promise<string> {
   });
 
   const runner = new TemporalOpenAIRunner({
-    startToCloseTimeout: '10s',
-    retryPolicy: { maximumAttempts: 1 },
+    modelParams: { startToCloseTimeout: '10s', retryPolicy: { maximumAttempts: 1 } },
   });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
@@ -908,8 +909,7 @@ export async function xShouldRetryWorkflow(prompt: string): Promise<string> {
   });
 
   const runner = new TemporalOpenAIRunner({
-    startToCloseTimeout: '10s',
-    retryPolicy: { maximumAttempts: 1 },
+    modelParams: { startToCloseTimeout: '10s', retryPolicy: { maximumAttempts: 1 } },
   });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
@@ -928,8 +928,7 @@ export async function plainErrorWorkflow(prompt: string): Promise<string> {
   });
 
   const runner = new TemporalOpenAIRunner({
-    startToCloseTimeout: '10s',
-    retryPolicy: { maximumAttempts: 3, initialInterval: '100ms' },
+    modelParams: { startToCloseTimeout: '10s', retryPolicy: { maximumAttempts: 3, initialInterval: '100ms' } },
   });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
@@ -946,7 +945,7 @@ export async function extendedModelParamsWorkflow(prompt: string): Promise<strin
   });
 
   const runner = new TemporalOpenAIRunner({
-    priority: { priorityKey: 1 },
+    modelParams: { priority: { priorityKey: 1 } },
   });
   const result = await runner.run(agent, prompt);
   return result.finalOutput ?? '';
@@ -1527,4 +1526,225 @@ export async function queryTracePropagationWorkflow(): Promise<string> {
 
   await condition(() => done, '30 seconds');
   return 'done';
+}
+
+// --- Config header propagation test workflows ---
+
+const configUpdateWithStartUpdate = defineUpdate<
+  { addTemporalSpans: boolean; taskQueue: string | undefined },
+  []
+>('configUpdateWithStart');
+
+/**
+ * Reads the per-workflow plugin config and returns addTemporalSpans and
+ * modelParams.taskQueue. Used by header propagation tests to verify the
+ * config header was decoded and stored correctly.
+ */
+export async function configPropagationWorkflow(): Promise<{
+  addTemporalSpans: boolean;
+  taskQueue: string | undefined;
+}> {
+  // Runner constructor populates the store from the header (if present)
+  // or from its own args.
+  new TemporalOpenAIRunner();
+  const config = getCurrentPluginConfig();
+  return {
+    addTemporalSpans: config?.addTemporalSpans ?? false,
+    taskQueue: config?.modelParams?.taskQueue,
+  };
+}
+
+/**
+ * Variant of configPropagationWorkflow with an update handler, used by the
+ * startUpdateWithStart propagation test. The update returns the observed config;
+ * the workflow waits for the update to fire before completing.
+ */
+export async function configUpdateWithStartWorkflow(): Promise<{
+  addTemporalSpans: boolean;
+  taskQueue: string | undefined;
+}> {
+  new TemporalOpenAIRunner();
+  const config = getCurrentPluginConfig();
+  const result = {
+    addTemporalSpans: config?.addTemporalSpans ?? false,
+    taskQueue: config?.modelParams?.taskQueue,
+  };
+
+  let updateFired = false;
+  setHandler(configUpdateWithStartUpdate, () => {
+    updateFired = true;
+    return result;
+  });
+
+  await condition(() => updateFired, '30 seconds');
+  return result;
+}
+
+/**
+ * ContinueAsNew test: first run stores config and continues-as-new.
+ * Second run (iteration=1) reads config from the store (propagated via
+ * the outbound interceptor's continueAsNew header injection) and returns it.
+ */
+export async function configContinueAsNewWorkflow(iteration: number): Promise<{
+  addTemporalSpans: boolean;
+  taskQueue: string | undefined;
+}> {
+  new TemporalOpenAIRunner();
+
+  if (iteration === 0) {
+    await continueAsNew<typeof configContinueAsNewWorkflow>(1);
+  }
+
+  // Second run — config should have been propagated via continueAsNew header
+  const config = getCurrentPluginConfig();
+  return {
+    addTemporalSpans: config?.addTemporalSpans ?? false,
+    taskQueue: config?.modelParams?.taskQueue,
+  };
+}
+
+/**
+ * Child workflow that reads config from the store. Used by the parent
+ * workflow to verify child workflows receive the config header.
+ */
+export async function configChildWorkflow(): Promise<{
+  addTemporalSpans: boolean;
+  taskQueue: string | undefined;
+}> {
+  new TemporalOpenAIRunner();
+  const config = getCurrentPluginConfig();
+  return {
+    addTemporalSpans: config?.addTemporalSpans ?? false,
+    taskQueue: config?.modelParams?.taskQueue,
+  };
+}
+
+/**
+ * Parent workflow that starts a child workflow and returns its config observation.
+ * Tests that the outbound interceptor re-injects the config header for child workflows.
+ */
+export async function configChildParentWorkflow(): Promise<{
+  addTemporalSpans: boolean;
+  taskQueue: string | undefined;
+}> {
+  new TemporalOpenAIRunner();
+  return executeChild(configChildWorkflow, { args: [] });
+}
+
+/**
+ * Override precedence test: the runner constructor args should win over the
+ * plugin config header values.
+ */
+export async function configOverridePrecedenceWorkflow(): Promise<{
+  addTemporalSpans: boolean;
+  taskQueue: string | undefined;
+}> {
+  // Runner overrides: addTemporalSpans=false (overriding plugin's true),
+  // taskQueue='runner-override' (overriding plugin's header value)
+  new TemporalOpenAIRunner({
+    addTemporalSpans: false,
+    modelParams: { taskQueue: 'runner-override' },
+  });
+  const config = getCurrentPluginConfig();
+  return {
+    addTemporalSpans: config?.addTemporalSpans ?? true,
+    taskQueue: config?.modelParams?.taskQueue,
+  };
+}
+
+/**
+ * Fallback test: workflow started without the plugin client interceptor (no
+ * config header). The runner constructor populates the store from its own args.
+ */
+export async function configFallbackWorkflow(): Promise<{
+  addTemporalSpans: boolean;
+}> {
+  new TemporalOpenAIRunner({ addTemporalSpans: true });
+  const config = getCurrentPluginConfig();
+  return {
+    addTemporalSpans: config?.addTemporalSpans ?? false,
+  };
+}
+
+/**
+ * H3 regression test: constructing multiple runners in the same workflow should
+ * NOT accumulate modelParams from earlier runners. Each runner merges its own
+ * args with the original header config, not the effective config left by the
+ * previous runner.
+ */
+export async function configModelParamsIsolationWorkflow(): Promise<{
+  r1TaskQueue: string | undefined;
+  r2TaskQueue: string | undefined;
+  r2StartToCloseTimeout: string | number | undefined;
+}> {
+  // Runner 1: sets taskQueue='a'
+  new TemporalOpenAIRunner({ modelParams: { taskQueue: 'a' } });
+  const config1 = getCurrentPluginConfig();
+  const r1TaskQueue = config1?.modelParams?.taskQueue;
+
+  // Runner 2: sets startToCloseTimeout='5s', does NOT set taskQueue.
+  // If the bug exists, r2 would inherit taskQueue='a' from r1's effective config.
+  new TemporalOpenAIRunner({ modelParams: { startToCloseTimeout: '5s' } });
+  const config2 = getCurrentPluginConfig();
+  const r2TaskQueue = config2?.modelParams?.taskQueue;
+  const r2StartToCloseTimeout = config2?.modelParams?.startToCloseTimeout;
+
+  return { r1TaskQueue, r2TaskQueue, r2StartToCloseTimeout };
+}
+
+/**
+ * M1 regression test — child workflow for summaryOverride function-form stripping.
+ * Reads summaryOverride AND taskQueue from the plugin config store and returns both.
+ *
+ * The parent sets a function-form summaryOverride AND a sibling `taskQueue` field
+ * via the runner. The outbound interceptor's `injectConfigHeaderFromStore` must:
+ * - Strip summaryOverride (non-string → omitted from wire header)
+ * - Preserve taskQueue (serializable string → survives wire header)
+ *
+ * The sibling assertion makes the test rock-solid: even if JSON serialization
+ * also happens to drop summaryOverride as a side-effect, the taskQueue surviving
+ * proves the explicit M1 narrowing logic (destructure + selective reattach) is
+ * doing meaningful work and preserving siblings correctly.
+ */
+export async function summaryOverrideFunctionStripChildWorkflow(): Promise<{
+  summaryOverride: string | undefined;
+  taskQueue: string | undefined;
+}> {
+  new TemporalOpenAIRunner();
+  const config = getCurrentPluginConfig();
+  return {
+    summaryOverride: config?.modelParams?.summaryOverride as string | undefined,
+    taskQueue: config?.modelParams?.taskQueue,
+  };
+}
+
+/**
+ * M1 regression test — parent workflow that sets a function-form summaryOverride
+ * AND a serializable sibling field (`taskQueue`) via the runner constructor.
+ *
+ * The child reads both summaryOverride and taskQueue from the propagated config.
+ *
+ * **Discrimination design:**
+ * - Pre-M1, `injectConfigHeaderFromStore` forwarded `config.modelParams` directly.
+ *   JSON serialization would silently mangle the function form (drop the function
+ *   method, leaving `{}` for the parent object or stripping the field entirely
+ *   depending on JS spec corner cases).
+ * - Post-M1, the function explicitly narrows summaryOverride (drops non-string
+ *   values via destructure + selective reattach) BEFORE injecting into the wire
+ *   header.
+ * - The test discriminates by checking BOTH: summaryOverride is undefined (stripped)
+ *   AND taskQueue survives (sibling preserved). The sibling proves the strip is
+ *   targeted — not collateral damage from a broken serialization path.
+ */
+export async function summaryOverrideFunctionStripParentWorkflow(): Promise<{
+  summaryOverride: string | undefined;
+  taskQueue: string | undefined;
+}> {
+  new TemporalOpenAIRunner({
+    modelParams: {
+      summaryOverride: { provide: () => 'parent-summary' },
+      taskQueue: 'sibling-task-queue',
+    },
+  });
+  return executeChild(summaryOverrideFunctionStripChildWorkflow, { args: [] });
 }

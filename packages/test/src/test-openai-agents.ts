@@ -14,7 +14,13 @@ import {
   toSerializedModelResponse,
   OpenAIAgentsTraceClientInterceptor,
 } from '@temporalio/openai-agents';
-import { WorkflowFailedError, WorkflowClient } from '@temporalio/client';
+import {
+  Client,
+  WorkflowFailedError,
+  WorkflowClient,
+  WithStartWorkflowOperation,
+  WorkflowIdConflictPolicy,
+} from '@temporalio/client';
 import { temporal } from '@temporalio/proto';
 import {
   basicAgentWorkflow,
@@ -79,6 +85,14 @@ import {
   alsContextShapeSmokeCheckWorkflow,
   alsLeakDetectionWorkflow,
   queryTracePropagationWorkflow,
+  configPropagationWorkflow,
+  configUpdateWithStartWorkflow,
+  configContinueAsNewWorkflow,
+  configChildParentWorkflow,
+  configOverridePrecedenceWorkflow,
+  configFallbackWorkflow,
+  configModelParamsIsolationWorkflow,
+  summaryOverrideFunctionStripParentWorkflow,
 } from './workflows/openai-agents';
 import { helpers, makeTestFunction } from './helpers-integration';
 import {
@@ -96,6 +110,19 @@ import {
 } from './stubs/openai-agents';
 import { getWeather, calculateSum } from './activities/openai-agents';
 import EventType = temporal.api.enums.v1.EventType;
+
+// --- Compile-time negative tests: plugin-side modelParams rejects function-form summaryOverride ---
+// These @ts-expect-error lines document that SerializableModelActivityOptions
+// (used by the plugin and client interceptor) excludes ModelSummaryProvider.
+// If the type restriction is accidentally removed, TS will error on the
+// "unused @ts-expect-error" directive, catching the regression at compile time.
+{
+  const _provider = null! as FakeModelProvider;
+  // @ts-expect-error — plugin-side modelParams.summaryOverride only accepts string, not function/object
+  new OpenAIAgentsPlugin({ modelProvider: _provider, modelParams: { summaryOverride: { provide: () => 'x' } } });
+  // @ts-expect-error — client interceptor modelParams.summaryOverride only accepts string, not function/object
+  new OpenAIAgentsTraceClientInterceptor({ modelParams: { summaryOverride: { provide: () => 'x' } } });
+}
 
 const test = makeTestFunction({
   workflowsPath: require.resolve('./workflows/openai-agents'),
@@ -3103,6 +3130,403 @@ test('Query carries trace context from client to workflow', async (t) => {
       result.queryTraceId,
       result.clientTraceId,
       'Query handler traceId must match client-side traceId (proves query propagation)'
+    );
+  });
+});
+
+// --- Config header propagation tests (H1) ---
+
+test('Config header propagated via startWithDetails', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [
+      new OpenAIAgentsTraceClientInterceptor({
+        addTemporalSpans: true,
+        modelParams: { taskQueue: 'plugin-tq' },
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await wfClient.execute(configPropagationWorkflow, {
+      taskQueue,
+      workflowId: `config-start-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.is(result.addTemporalSpans, true, 'addTemporalSpans should be propagated from plugin');
+    t.is(result.taskQueue, 'plugin-tq', 'modelParams.taskQueue should be propagated from plugin');
+  });
+});
+
+test('Config header propagated via startWithDetails (plugin auto-wired)', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  // Use Client with plugins — the plugin's configureClient auto-wires
+  // the OpenAIAgentsTraceClientInterceptor onto the Client's workflow
+  // interceptors, exercising the auto-wiring contract.
+  const client = new Client({
+    connection: (t.context as any).env.connection,
+    plugins: [agentsPlugin],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await client.workflow.execute(configPropagationWorkflow, {
+      taskQueue,
+      workflowId: `config-start-auto-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.is(result.addTemporalSpans, true, 'addTemporalSpans should be propagated via plugin auto-wiring');
+    t.is(result.taskQueue, 'plugin-tq', 'modelParams.taskQueue should be propagated via plugin auto-wiring');
+  });
+});
+
+test('Config header propagated via signalWithStart', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [
+      new OpenAIAgentsTraceClientInterceptor({
+        addTemporalSpans: true,
+        modelParams: { taskQueue: 'plugin-tq' },
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    // signalWithStart starts the workflow AND sends a signal atomically
+    const handle = await wfClient.signalWithStart(configPropagationWorkflow, {
+      taskQueue,
+      workflowId: `config-signal-start-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+      signal: 'unused-signal',
+      signalArgs: [],
+    });
+
+    const result = await handle.result();
+    t.is(result.addTemporalSpans, true, 'addTemporalSpans should be propagated via signalWithStart');
+    t.is(result.taskQueue, 'plugin-tq', 'modelParams.taskQueue should be propagated via signalWithStart');
+  });
+});
+
+test('Config header propagated via startUpdateWithStart', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [
+      new OpenAIAgentsTraceClientInterceptor({
+        addTemporalSpans: true,
+        modelParams: { taskQueue: 'plugin-tq' },
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    // executeUpdateWithStart starts the workflow AND sends an update atomically.
+    // The workflow has an update handler that returns the observed config.
+    const startOp = new WithStartWorkflowOperation(configUpdateWithStartWorkflow, {
+      taskQueue,
+      workflowId: `config-update-start-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+      workflowIdConflictPolicy: WorkflowIdConflictPolicy.FAIL,
+    });
+
+    const updateResult = await wfClient.executeUpdateWithStart('configUpdateWithStart', {
+      startWorkflowOperation: startOp,
+    });
+
+    t.is(
+      (updateResult as any).addTemporalSpans,
+      true,
+      'addTemporalSpans should be propagated via startUpdateWithStart'
+    );
+    t.is(
+      (updateResult as any).taskQueue,
+      'plugin-tq',
+      'modelParams.taskQueue should be propagated via startUpdateWithStart'
+    );
+  });
+});
+
+test('Config header propagated via continueAsNew', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [
+      new OpenAIAgentsTraceClientInterceptor({
+        addTemporalSpans: true,
+        modelParams: { taskQueue: 'plugin-tq' },
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await wfClient.execute(configContinueAsNewWorkflow, {
+      taskQueue,
+      workflowId: `config-continue-as-new-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+      args: [0], // iteration=0, will continueAsNew to iteration=1
+    });
+
+    t.is(result.addTemporalSpans, true, 'addTemporalSpans should survive continueAsNew');
+    t.is(result.taskQueue, 'plugin-tq', 'modelParams.taskQueue should survive continueAsNew');
+  });
+});
+
+test('Config header propagated to child workflows', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [
+      new OpenAIAgentsTraceClientInterceptor({
+        addTemporalSpans: true,
+        modelParams: { taskQueue: 'plugin-tq' },
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await wfClient.execute(configChildParentWorkflow, {
+      taskQueue,
+      workflowId: `config-child-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.is(result.addTemporalSpans, true, 'addTemporalSpans should be propagated to child workflow');
+    t.is(result.taskQueue, 'plugin-tq', 'modelParams.taskQueue should be propagated to child workflow');
+  });
+});
+
+// --- Override precedence test (H1) ---
+
+test('Runner constructor args override plugin config header values', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+    interceptorOptions: { addTemporalSpans: true },
+    modelParams: { taskQueue: 'plugin-tq' },
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [
+      new OpenAIAgentsTraceClientInterceptor({
+        addTemporalSpans: true,
+        modelParams: { taskQueue: 'plugin-tq' },
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await wfClient.execute(configOverridePrecedenceWorkflow, {
+      taskQueue,
+      workflowId: `config-override-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    // Runner overrides addTemporalSpans=false (plugin had true)
+    t.is(result.addTemporalSpans, false, 'Runner addTemporalSpans=false should override plugin true');
+    // Runner overrides taskQueue='runner-override' (plugin had 'plugin-tq')
+    t.is(result.taskQueue, 'runner-override', 'Runner taskQueue should override plugin taskQueue');
+  });
+});
+
+// --- Fallback test (H1): no plugin client interceptor ---
+
+test('Runner populates store from own args when no plugin client interceptor is wired', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    // env.client.workflow.execute does NOT have the plugin client interceptor,
+    // so no __openai_agents_config header is injected. The workflow's runner
+    // constructor should still populate the store from its own args.
+    const result = await executeWorkflow(configFallbackWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.is(
+      result.addTemporalSpans,
+      true,
+      'Runner args should populate store even without plugin client interceptor'
+    );
+  });
+});
+
+// --- H3 regression: modelParams isolation between runners ---
+
+test('modelParams override does not leak between runners in the same workflow', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(configModelParamsIsolationWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    t.is(result.r1TaskQueue, 'a', 'Runner 1 should have taskQueue=a');
+    // Runner 2 did NOT set taskQueue — it should NOT inherit 'a' from runner 1
+    t.not(
+      result.r2TaskQueue,
+      'a',
+      'Runner 2 should NOT inherit taskQueue from runner 1 (accumulation bug)'
+    );
+    t.is(result.r2StartToCloseTimeout, '5s', 'Runner 2 should have its own startToCloseTimeout');
+  });
+});
+
+// --- M1 regression: summaryOverride function form stripped before child workflow propagation ---
+
+// **Discrimination design (rock-solid):**
+// Pre-M1, injectConfigHeaderFromStore forwarded config.modelParams directly into
+// the wire header. JSON serialization would silently mangle the function form
+// (drop the function method, leaving {} for the parent object or stripping the
+// field entirely depending on JS spec corner cases).
+//
+// Post-M1, the function explicitly narrows summaryOverride (drops non-string
+// values via destructure + selective reattach) BEFORE injecting into the wire
+// header. The test discriminates by checking BOTH:
+//   1. summaryOverride is undefined (stripped — non-string form removed)
+//   2. taskQueue === 'sibling-task-queue' (sibling preserved intact)
+//
+// The sibling assertion proves the strip is targeted — not collateral damage
+// from a broken serialization path. Without the M1 narrowing, a future bug that
+// drops siblings while stripping summaryOverride would be caught.
+test('summaryOverride function form set via runner is stripped before child workflow propagation', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const agentsPlugin = new OpenAIAgentsPlugin({
+    modelProvider: new FakeModelProvider([textResponse('x')]),
+  });
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [agentsPlugin],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [new OpenAIAgentsTraceClientInterceptor()],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await wfClient.execute(summaryOverrideFunctionStripParentWorkflow, {
+      taskQueue,
+      workflowId: `summary-fn-strip-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    // The parent set summaryOverride to a function-form (ModelSummaryProvider).
+    // injectConfigHeaderFromStore must strip it — functions can't survive JSON.
+    // The child should see undefined, not a corrupted shape like {} or "[Function]".
+    t.is(
+      result.summaryOverride,
+      undefined,
+      'Function-form summaryOverride must be stripped before child workflow propagation'
+    );
+
+    // Sibling field must survive — proves the M1 destructure-and-reattach in
+    // injectConfigHeaderFromStore correctly preserves serializable siblings
+    // while stripping non-serializable summaryOverride.
+    t.is(
+      result.taskQueue,
+      'sibling-task-queue',
+      'Sibling modelParams fields must propagate intact through injectConfigHeaderFromStore'
     );
   });
 });

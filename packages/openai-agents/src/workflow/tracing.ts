@@ -1,5 +1,5 @@
 import { addTraceProcessor, getCurrentTrace, getGlobalTraceProvider, Trace } from '@openai/agents-core';
-import { inWorkflowContext, workflowInfo, uuid4, log } from '@temporalio/workflow';
+import { inWorkflowContext, workflowInfo, uuid4 } from '@temporalio/workflow';
 import { BaseAgentTracingProcessor, type SpanEntry } from '../common/base-tracing-processor';
 import { TemporalIdGenerator } from '../common/tracing-bridge';
 
@@ -16,32 +16,10 @@ export function isReplaying(): boolean {
 
 // --- OTel bridge: maps OpenAI Agents SDK trace events to OTel spans ---
 
-const REGISTERED_KEY = Symbol.for('temporal-openai-agents-processor-registered');
-
-// Shared config symbol — read by workflow interceptors (trace-interceptor.ts)
-// to gate addTemporalSpans / startTraces behavior.
-const CONFIG_SYMBOL = Symbol.for('temporal-openai-agents-config');
-
-export interface TemporalTracingProcessorOptions {
-  /**
-   * When `true`, workflow/activity interceptors wrap calls in
-   * `temporal:*` custom spans for Temporal-specific instrumentation.
-   * Set to `false` (default) to disable these spans while keeping trace propagation.
-   *
-   * Stored on `globalThis` so workflow interceptors (loaded via workflowModules)
-   * can read it without direct access to plugin options.
-   *
-   * Default: `false`.
-   */
-  addTemporalSpans?: boolean;
-
-  /**
-   * When `true`, restored trace contexts fire processor events (`onTraceStart`,
-   * `onSpanStart`). When `false` (default), sets ALS context directly.
-   * Stored on `globalThis` for workflow interceptor access.
-   */
-  startTraces?: boolean;
-}
+// Module-level state is private to this module and lives once per V8 isolate,
+// matching the old globalThis semantics with stronger typing. Under
+// `reuseV8Context: true` the module is loaded once per isolate.
+let processorRegistered = false;
 
 /**
  * Bridges OpenAI Agents SDK trace events to OpenTelemetry spans.
@@ -76,7 +54,7 @@ export class TemporalTracingProcessor extends BaseAgentTracingProcessor {
    */
   private readonly spans = new Map<string, Map<string, SpanEntry>>();
 
-  constructor(_options?: TemporalTracingProcessorOptions) {
+  constructor() {
     // The workflow V8 sandbox does not bundle `@opentelemetry/sdk-trace-base`'s
     // `BasicTracerProvider`, so a `ReplaySafeTracerProvider` cannot be
     // constructed here. Instead, write the generator directly onto the
@@ -129,7 +107,8 @@ export class TemporalTracingProcessor extends BaseAgentTracingProcessor {
 
 // --- Deterministic ID override ---
 
-const IDS_INSTALLED_KEY = Symbol.for('temporal-openai-agents-deterministic-ids');
+// Module-level idempotency flag — once per V8 isolate.
+let deterministicIdsInstalled = false;
 
 /**
  * Wraps the upstream TraceProvider's `createTrace` and `createSpan` methods
@@ -138,8 +117,8 @@ const IDS_INSTALLED_KEY = Symbol.for('temporal-openai-agents-deterministic-ids')
  * in `@temporalio/workflow/polyfills` is a secondary safety net.
  */
 function installDeterministicTraceIds(): void {
-  if ((globalThis as any)[IDS_INSTALLED_KEY]) return;
-  (globalThis as any)[IDS_INSTALLED_KEY] = true;
+  if (deterministicIdsInstalled) return;
+  deterministicIdsInstalled = true;
 
   const provider = getGlobalTraceProvider() as any;
 
@@ -165,36 +144,22 @@ function installDeterministicTraceIds(): void {
 
 /**
  * Appends a {@link TemporalTracingProcessor} to the OpenAI Agents SDK's
- * global processor list, enables deterministic ID generation, and stores
- * interceptor config on `globalThis`.
+ * global processor list and enables deterministic ID generation.
  *
  * **Side effects**:
  * - Mutates the upstream TraceProvider (processor list + createTrace/createSpan)
- * - Sets `globalThis[Symbol.for('temporal-openai-agents-config')]`
  *
  * Called automatically by the {@link TemporalOpenAIRunner} constructor.
+ * Per-workflow config (addTemporalSpans, startTraces, modelParams) is stored
+ * in the per-workflow plugin-config-store, NOT here.
  *
- * Idempotent — first call wins. Subsequent calls with different options
- * log a warning but are otherwise no-ops.
+ * Idempotent — runs once per V8 isolate.
  */
-export function ensureTracingProcessorRegistered(options?: TemporalTracingProcessorOptions): void {
-  if ((globalThis as any)[REGISTERED_KEY]) {
-    if (options) {
-      log.warn(
-        'ensureTracingProcessorRegistered called again with options — first-call options win, this call ignored'
-      );
-    }
-    return;
-  }
-  (globalThis as any)[REGISTERED_KEY] = true;
+export function ensureTracingProcessorRegistered(): void {
+  if (processorRegistered) return;
+  processorRegistered = true;
 
-  // Store interceptor config for workflow interceptors (loaded via workflowModules)
-  (globalThis as any)[CONFIG_SYMBOL] = {
-    addTemporalSpans: options?.addTemporalSpans,
-    startTraces: options?.startTraces,
-  };
-
-  addTraceProcessor(new TemporalTracingProcessor(options));
+  addTraceProcessor(new TemporalTracingProcessor());
   installDeterministicTraceIds();
   verifyAlsContextShape();
 }
@@ -208,9 +173,11 @@ const AGENTS_CORE_ALS_SYMBOL = Symbol.for('openai.agents.core.asyncLocalStorage'
  * still works as expected. The plugin reaches into this shape to set trace
  * context without firing processor events (see common/trace-context.ts).
  *
- * Runs once at plugin init. If upstream renames `active`, restructures the
- * store, or changes how `getCurrentTrace()` reads it, this fails loudly
- * instead of silently losing trace context at runtime.
+ * Runs once per V8 isolate during the first {@link TemporalOpenAIRunner}
+ * construction in that isolate (called from {@link ensureTracingProcessorRegistered}).
+ * If upstream renames `active`, restructures the store, or changes how
+ * `getCurrentTrace()` reads it, this fails loudly instead of silently
+ * losing trace context at runtime.
  */
 function verifyAlsContextShape(): void {
   // Force ALS initialization — getCurrentTrace() triggers lazy creation of
@@ -233,6 +200,10 @@ function verifyAlsContextShape(): void {
   // Manually save/restore the ALS store: the workflow bundle picks an upstream shim
   // whose `run()` doesn't restore context, so the sentinel would otherwise persist
   // across subsequent workflow executions sharing the V8 isolate.
+  //
+  // With header-driven trace context restoration (Item 18), `prev` may be a
+  // meaningful restored context from the inbound interceptor, not just undefined.
+  // The save/restore is still correct — we don't want the sentinel to replace it.
   const prev = (als as any).getStore?.();
   let retrieved: unknown;
   try {

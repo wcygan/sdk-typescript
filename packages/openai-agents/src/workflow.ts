@@ -21,7 +21,8 @@ export {
   TemporalTracingProcessor,
   ensureTracingProcessorRegistered,
 } from './workflow/tracing';
-export type { TemporalTracingProcessorOptions } from './workflow/tracing';
+export { getCurrentPluginConfig } from './workflow/plugin-config-store';
+export type { PluginConfig } from './workflow/plugin-config-store';
 export {
   WIRE_VERSION,
   type SerializedModelRequest,
