@@ -1,4 +1,5 @@
 import type { AgentInputItem, ModelProvider, ModelRequest, ModelResponse } from '@openai/agents-core';
+import { APIError } from 'openai';
 import { ApplicationFailure } from '@temporalio/common';
 import { heartbeat, activityInfo } from '@temporalio/activity';
 import {
@@ -65,80 +66,6 @@ function fromSerializedModelRequest(wire: SerializedModelRequest): ModelRequest 
   };
 }
 
-function getStatus(error: unknown): number | undefined {
-  if (!error || typeof error !== 'object') return undefined;
-  const e = error as any;
-  if (typeof e.status === 'number') return e.status;
-  if (e.response && typeof e.response.status === 'number') return e.response.status;
-  return undefined;
-}
-
-function getHeader(error: unknown, name: string): string | undefined {
-  if (!error || typeof error !== 'object') return undefined;
-  const e = error as any;
-  const h1 = e.headers;
-  if (h1) {
-    if (typeof h1.get === 'function') {
-      const v = h1.get(name);
-      if (typeof v === 'string') return v;
-    } else if (typeof h1 === 'object' && typeof h1[name] === 'string') {
-      return h1[name];
-    }
-  }
-  const h2 = e.response?.headers;
-  if (h2) {
-    if (typeof h2.get === 'function') {
-      const v = h2.get(name);
-      if (typeof v === 'string') return v;
-    } else if (typeof h2 === 'object' && typeof h2[name] === 'string') {
-      return h2[name];
-    }
-  }
-  return undefined;
-}
-
-function isRetryableError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-
-  const shouldRetry = getHeader(error, 'x-should-retry');
-  if (shouldRetry === 'true') return true;
-  if (shouldRetry === 'false') return false;
-
-  const status = getStatus(error);
-  if (status === undefined) {
-    return (error as any).response !== undefined;
-  }
-  if (status === 408 || status === 409 || status === 429 || status >= 500) {
-    return true;
-  }
-  return false;
-}
-
-function errorTypeFromStatus(status: number | undefined): string {
-  if (status === undefined) return 'ModelInvocationError';
-  if (status === 429) return 'ModelInvocationError.RateLimit';
-  if (status === 401 || status === 403) return 'ModelInvocationError.Authentication';
-  if (status === 408) return 'ModelInvocationError.Timeout';
-  if (status === 409) return 'ModelInvocationError.Conflict';
-  if (status >= 400 && status < 500) return 'ModelInvocationError.BadRequest';
-  if (status >= 500) return 'ModelInvocationError.ServerError';
-  return 'ModelInvocationError';
-}
-
-function getRetryAfterMs(error: unknown): number | undefined {
-  const ms = getHeader(error, 'retry-after-ms');
-  if (ms) {
-    const parsed = parseFloat(ms);
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-  const s = getHeader(error, 'retry-after');
-  if (s) {
-    const parsed = parseFloat(s);
-    if (!Number.isNaN(parsed)) return parsed * 1000;
-  }
-  return undefined;
-}
-
 /**
  * Creates the model activity functions to be registered with the Worker.
  * The returned activities use the provided ModelProvider to resolve models
@@ -186,16 +113,66 @@ export function createModelActivity(modelProvider: ModelProvider): {
         const response = await model.getResponse(fromSerializedModelRequest(input.request));
         return toSerializedModelResponse(response);
       } catch (error) {
-        const retryable = isRetryableError(error);
-        const message = error instanceof Error ? error.message : String(error);
-        const retryAfterMs = getRetryAfterMs(error);
+        if (error instanceof APIError) {
+          const status = error.status;
+          const headers = error.headers;
 
+          // Prefer retry-after-ms (OpenAI-specific, millisecond precision) over standard Retry-After (seconds, converted to ms)
+          let nextRetryDelay: number | undefined;
+          if (headers) {
+            const ms = headers.get('retry-after-ms');
+            if (ms) {
+              const parsed = parseFloat(ms);
+              if (!Number.isNaN(parsed)) nextRetryDelay = parsed;
+            }
+            if (nextRetryDelay === undefined) {
+              const s = headers.get('retry-after');
+              if (s) {
+                const parsed = parseFloat(s);
+                if (!Number.isNaN(parsed)) nextRetryDelay = parsed * 1000;
+              }
+            }
+          }
+
+          // x-should-retry header overrides status-based classification
+          let nonRetryable: boolean;
+          const shouldRetry = headers?.get('x-should-retry');
+          if (shouldRetry === 'true') {
+            nonRetryable = false;
+          } else if (shouldRetry === 'false') {
+            nonRetryable = true;
+          } else if (status !== undefined && (status === 408 || status === 409 || status === 429 || status >= 500)) {
+            nonRetryable = false;
+          } else {
+            nonRetryable = true;
+          }
+
+          // Map status to error subtype
+          let type: string;
+          if (status === 429) type = 'ModelInvocationError.RateLimit';
+          else if (status === 401 || status === 403) type = 'ModelInvocationError.Authentication';
+          else if (status === 400 || status === 422) type = 'ModelInvocationError.BadRequest';
+          else if (status === 408) type = 'ModelInvocationError.Timeout';
+          else if (status === 409) type = 'ModelInvocationError.Conflict';
+          else if (status !== undefined && status >= 500) type = 'ModelInvocationError.ServerError';
+          else type = 'ModelInvocationError';
+
+          throw ApplicationFailure.create({
+            message: `Model invocation failed: ${error.message}`,
+            type,
+            nonRetryable,
+            cause: error,
+            ...(nextRetryDelay !== undefined ? { nextRetryDelay } : {}),
+          });
+        }
+
+        // Non-APIError: wrap generically and let Temporal's retry policy decide
+        const message = error instanceof Error ? error.message : String(error);
         throw ApplicationFailure.create({
           message: `Model invocation failed: ${message}`,
-          type: errorTypeFromStatus(getStatus(error)),
-          nonRetryable: !retryable,
+          type: 'ModelInvocationError',
+          nonRetryable: false,
           cause: error instanceof Error ? error : new Error(String(error)),
-          ...(retryAfterMs !== undefined ? { nextRetryDelay: retryAfterMs } : {}),
         });
       } finally {
         stopped = true;

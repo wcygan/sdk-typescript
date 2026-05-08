@@ -15,7 +15,7 @@ import {
 import { ApplicationFailure } from '@temporalio/common';
 import { DEFAULT_MODEL_ACTIVITY_OPTIONS, type ModelActivityOptions } from '../common/model-activity-options';
 import { unwrapTemporalFailure } from '../common/errors';
-import { DummyModelProvider } from './dummy-model-provider';
+import { PlaceholderModelProvider } from './dummy-model-provider';
 import { convertAgent } from './convert-agent';
 import { ensureTracingProcessorRegistered } from './tracing';
 
@@ -110,13 +110,13 @@ export class TemporalOpenAIRunner {
 
     const converted = convertAgent(agent, this.modelParams, undefined, modelOverride);
 
-    const internalRunner = new Runner({
-      modelProvider: new DummyModelProvider(),
+    const innerRunner = new Runner({
+      modelProvider: new PlaceholderModelProvider(),
       ...runnerConfigOverrides,
     });
 
     try {
-      return (await internalRunner.run(converted, input, {
+      return (await innerRunner.run(converted, input, {
         maxTurns: options?.maxTurns,
         context: options?.context,
         previousResponseId: options?.previousResponseId,

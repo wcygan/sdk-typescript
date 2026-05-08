@@ -4,10 +4,14 @@ import { OpenAIAgentsTraceClientInterceptor } from '../client/trace-interceptor'
 import type { ModelActivityOptions } from '../common/model-activity-options';
 import { createModelActivity } from './activities';
 import type { StatelessMCPServerProvider } from './mcp-provider';
+import type { StatefulMCPServerProvider } from './stateful-mcp-provider';
 import {
   OpenAIAgentsTraceActivityInboundInterceptor,
   type OpenAIAgentsTraceInterceptorOptions,
 } from './trace-interceptor';
+
+/** Either a stateless or stateful MCP server provider. */
+export type MCPServerProvider = StatelessMCPServerProvider | StatefulMCPServerProvider;
 
 /**
  * Options for the OpenAI Agents plugin.
@@ -15,8 +19,11 @@ import {
 export interface OpenAIAgentsPluginOptions {
   /** The model provider to use for resolving model names to Model instances (e.g. OpenAIProvider) */
   modelProvider: ModelProvider;
-  /** Stateless MCP server providers whose activities will be auto-registered */
-  mcpServerProviders?: StatelessMCPServerProvider[];
+  /**
+   * MCP server providers whose activities will be auto-registered.
+   * Accepts both stateless and stateful providers.
+   */
+  mcpServerProviders?: MCPServerProvider[];
   /**
    * Default model activity options (timeouts, retry, task queue, etc.).
    *
@@ -50,16 +57,13 @@ export class OpenAIAgentsPlugin extends SimplePlugin {
 
     if (options.mcpServerProviders) {
       const seenNames = new Set<string>();
-      for (const provider of options.mcpServerProviders ?? []) {
+      for (const provider of options.mcpServerProviders) {
         if (seenNames.has(provider.name)) {
           throw new Error(
             `Duplicate MCP server provider name: '${provider.name}'. Each provider must have a unique name — activity keys collide.`
           );
         }
         seenNames.add(provider.name);
-      }
-
-      for (const provider of options.mcpServerProviders) {
         const providerActivities = provider._getActivities();
         allActivities = { ...allActivities, ...providerActivities };
       }

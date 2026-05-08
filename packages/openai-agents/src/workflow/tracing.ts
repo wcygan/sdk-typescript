@@ -5,7 +5,6 @@ import {
   type Trace,
   type SpanData,
   addTraceProcessor,
-  setTracingDisabled,
   getGlobalTraceProvider,
 } from '@openai/agents-core';
 import { inWorkflowContext, workflowInfo, uuid4, log } from '@temporalio/workflow';
@@ -16,8 +15,8 @@ import {
   dynamicAttributesFromSpanData,
   agentTraceIdToOtelTraceId,
   agentSpanIdToOtelSpanId,
-  installSeedableIdGenerator,
-  type SeedableIdGenerator,
+  installTemporalIdGenerator,
+  type TemporalIdGenerator,
 } from '../common/tracing-bridge';
 
 // --- Workflow context helpers ---
@@ -93,7 +92,7 @@ function syntheticParentContext(otelTraceId: string, otelParentSpanId: string): 
  *
  * OTel trace/span IDs are derived deterministically from agent SDK IDs
  * using {@link agentTraceIdToOtelTraceId} and {@link agentSpanIdToOtelSpanId}.
- * A {@link SeedableIdGenerator} is installed on the OTel Tracer to ensure
+ * A {@link TemporalIdGenerator} is installed on the OTel Tracer to ensure
  * each `tracer.startSpan()` produces spans with those derived IDs.
  * The activity-side processor applies the same conversion, so OTel spans
  * from both sides share the same trace ID and form a single trace tree.
@@ -108,12 +107,12 @@ function syntheticParentContext(otelTraceId: string, otelParentSpanId: string): 
  */
 export class TemporalTracingProcessor implements TracingProcessor {
   private readonly tracer: otel.Tracer;
-  private readonly idGen: SeedableIdGenerator;
+  private readonly idGen: TemporalIdGenerator;
   private readonly spans = new Map<string, Map<string, SpanEntry>>();
 
   constructor(_options?: TemporalTracingProcessorOptions) {
     this.tracer = otel.trace.getTracer(TRACER_NAME);
-    this.idGen = installSeedableIdGenerator(this.tracer);
+    this.idGen = installTemporalIdGenerator(this.tracer);
   }
 
   private getWorkflowSpans(): Map<string, SpanEntry> {
@@ -294,7 +293,6 @@ export function ensureTracingProcessorRegistered(options?: TemporalTracingProces
     startTraces: options?.startTraces,
   };
 
-  setTracingDisabled(false);
   addTraceProcessor(new TemporalTracingProcessor(options));
   installDeterministicTraceIds();
 }

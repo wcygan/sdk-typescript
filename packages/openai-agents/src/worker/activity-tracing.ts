@@ -15,7 +15,6 @@ import {
   type Trace,
   type SpanData,
   addTraceProcessor,
-  setTracingDisabled,
 } from '@openai/agents-core';
 import {
   TRACER_NAME,
@@ -24,8 +23,8 @@ import {
   dynamicAttributesFromSpanData,
   agentTraceIdToOtelTraceId,
   agentSpanIdToOtelSpanId,
-  installSeedableIdGenerator,
-  type SeedableIdGenerator,
+  installTemporalIdGenerator,
+  type TemporalIdGenerator,
 } from '../common/tracing-bridge';
 
 interface SpanEntry {
@@ -54,18 +53,18 @@ function syntheticParentContext(otelTraceId: string, otelParentSpanId: string): 
  *
  * OTel trace and span IDs are derived deterministically from agent SDK IDs
  * using the same conversion functions as the workflow-side processor.
- * A {@link SeedableIdGenerator} controls each `tracer.startSpan()` call,
+ * A {@link TemporalIdGenerator} controls each `tracer.startSpan()` call,
  * ensuring activity-side spans share the same OTel trace ID and form
  * correct parent-child links with workflow-side spans.
  */
 class ActivityTracingProcessor implements TracingProcessor {
   private readonly tracer: otel.Tracer;
-  private readonly idGen: SeedableIdGenerator;
+  private readonly idGen: TemporalIdGenerator;
   private readonly spans = new Map<string, SpanEntry>();
 
   constructor() {
     this.tracer = otel.trace.getTracer(TRACER_NAME);
-    this.idGen = installSeedableIdGenerator(this.tracer);
+    this.idGen = installTemporalIdGenerator(this.tracer);
   }
 
   async onTraceStart(trace: Trace): Promise<void> {
@@ -163,6 +162,5 @@ export function ensureActivityTracingProcessorRegistered(): void {
   if ((globalThis as any)[ACTIVITY_REGISTERED_KEY]) return;
   (globalThis as any)[ACTIVITY_REGISTERED_KEY] = true;
 
-  setTracingDisabled(false);
   addTraceProcessor(new ActivityTracingProcessor());
 }

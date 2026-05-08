@@ -49,6 +49,7 @@
     "@temporalio/openai-agents": "workspace:*",
     "@openai/agents-core": "~0.3.0",
     "@openai/agents-openai": "~0.3.0",
+    "openai": "^6.0.0",
     "@temporalio/nyc-test-coverage": "workspace:*",
     "@temporalio/plugin": "workspace:*",
     "@temporalio/proto": "workspace:*",

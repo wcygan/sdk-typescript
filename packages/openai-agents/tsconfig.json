@@ -6,6 +6,7 @@
   },
   "references": [
     { "path": "../plugin" },
+    { "path": "../worker" },
     { "path": "../workflow" },
     { "path": "../activity" },
     { "path": "../common" }

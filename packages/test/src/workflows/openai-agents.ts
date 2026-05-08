@@ -8,9 +8,14 @@ import {
   tool,
   addTraceProcessor,
   getCurrentTrace,
+  setTracingDisabled,
   withTrace,
   type ModelResponse,
 } from '@openai/agents-core';
+
+// Tests opt back into agent-SDK tracing because upstream auto-disables it under NODE_ENV=test;
+// the production plugin defers to upstream's default.
+setTracingDisabled(false);
 import { z } from 'zod';
 import { webSearchTool } from '@openai/agents-openai';
 import {
@@ -27,6 +32,8 @@ import {
   activityAsTool,
   TemporalOpenAIRunner,
   statelessMcpServer,
+  statefulMcpServer,
+  StatefulMCPServerReference,
   isInWorkflow,
   isReplaying,
   toSerializedModelRequest,
@@ -328,7 +335,7 @@ export async function builtInToolAgentWorkflow(prompt: string): Promise<string> 
 /**
  * Uses handoff(agent) wrapper (Handoff instance, not raw Agent in handoffs array).
  * The Handoff's inner agent must get its model replaced with ActivityBackedModel;
- * otherwise the model call hits DummyModel and throws.
+ * otherwise the model call hits PlaceholderModel and throws.
  */
 export async function handoffInstanceWorkflow(question: string): Promise<string> {
   const weatherSpecialist = new Agent({
@@ -910,7 +917,7 @@ export async function xShouldRetryWorkflow(prompt: string): Promise<string> {
 
 /**
  * Workflow for testing that a plain Error without HTTP status/response
- * is classified as non-retryable.
+ * is retryable (defers to Temporal's retry policy).
  */
 export async function plainErrorWorkflow(prompt: string): Promise<string> {
   const agent = new Agent({
@@ -1340,4 +1347,143 @@ export async function deterministicTraceIdsWorkflow(): Promise<{
 
   await runner.run(agent, 'Hi');
   return { traceIds, spanIds, spanStartTimestamps, workflowTimestamp };
+}
+
+/**
+ * Workflow that uses a stateful MCP server with a short scheduleToStartTimeout.
+ * When no dedicated worker is running, tool calls will time out and produce
+ * a DedicatedWorkerFailure ApplicationFailure.
+ */
+export async function statefulMcpNoWorkerWorkflow(scheduleToStartTimeoutMs: number): Promise<string> {
+  const server = statefulMcpServer('testStateful', {
+    config: {
+      startToCloseTimeout: '1 minute',
+      scheduleToStartTimeout: `${scheduleToStartTimeoutMs} milliseconds`,
+    },
+  });
+
+  await server.connect();
+  try {
+    await server.listTools();
+    return 'unexpected-success';
+  } catch (err: unknown) {
+    if (err instanceof ApplicationFailure) {
+      return `${err.type}: ${err.message}`;
+    }
+    throw err;
+  } finally {
+    await server.cleanup();
+  }
+}
+
+/**
+ * Workflow that creates a stateful MCP server, connects, calls tools, and cleans up.
+ */
+export async function statefulMcpAgentWorkflow(prompt: string): Promise<string> {
+  const server = statefulMcpServer('testStateful');
+
+  await server.connect();
+  try {
+    const agent = new Agent({
+      name: 'StatefulMcpAgent',
+      instructions: 'You have access to MCP tools.',
+      model: 'gpt-4o-mini',
+      mcpServers: [server],
+    });
+
+    const runner = new TemporalOpenAIRunner();
+    const result = await runner.run(agent, prompt, { maxTurns: 5 });
+    return result.finalOutput ?? '';
+  } finally {
+    await server.cleanup();
+  }
+}
+
+/**
+ * Workflow that tests calling listTools before connect throws an error.
+ */
+export async function statefulMcpNotConnectedWorkflow(): Promise<string> {
+  const server = statefulMcpServer('testStateful');
+  try {
+    await server.listTools();
+    return 'unexpected-success';
+  } catch (err: unknown) {
+    if (err instanceof ApplicationFailure) {
+      return err.message;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Workflow for testing multi-run isolation under reuseV8Context.
+ * Connects to a stateful MCP server, calls a tool, and returns the result.
+ * Each run's server instance is keyed by runId, so two runs on the same
+ * V8 isolate must see their own server's data.
+ */
+export async function statefulMcpIsolationWorkflow(): Promise<string> {
+  const server = statefulMcpServer('isolationTest');
+
+  await server.connect();
+  try {
+    const tools = await server.listTools();
+    if (tools.length === 0) return 'no-tools';
+    const result = await server.callTool(tools[0].name, null);
+    return JSON.stringify(result);
+  } finally {
+    await server.cleanup();
+  }
+}
+
+/**
+ * Workflow for testing heartbeat-timeout failure on operation activities.
+ * Sets a tight heartbeatTimeout on the operation config so that a blocking
+ * operation activity (listTools that hangs) triggers a heartbeat timeout,
+ * which handleWorkerFailure maps to DedicatedWorkerFailure.
+ *
+ * Uses a long scheduleToStartTimeout to ensure the dedicated worker picks
+ * up the activity before that timeout fires — the heartbeat timeout must
+ * be the one that fires first.
+ */
+export async function statefulMcpHeartbeatTimeoutWorkflow(): Promise<string> {
+  const server = statefulMcpServer('heartbeatTest', {
+    config: {
+      startToCloseTimeout: '30 seconds',
+      heartbeatTimeout: '1 second',
+      retryPolicy: { maximumAttempts: 1 },
+    },
+  });
+
+  await server.connect();
+  try {
+    await server.listTools();
+    return 'unexpected-success';
+  } catch (err: unknown) {
+    if (err instanceof ApplicationFailure) {
+      return `${err.type}: ${err.message}`;
+    }
+    throw err;
+  } finally {
+    await server.cleanup();
+  }
+}
+
+/**
+ * Workflow for replay-safety testing with maxCachedWorkflows: 0.
+ * Connects to a stateful MCP server, calls a tool, cleans up, and returns.
+ * The per-run task queue name is deterministic (based on runId), so replay
+ * must produce the same command sequence without NondeterminismError.
+ */
+export async function statefulMcpReplayWorkflow(): Promise<string> {
+  const server = statefulMcpServer('replayTest');
+
+  await server.connect();
+  try {
+    const tools = await server.listTools();
+    if (tools.length === 0) return 'no-tools';
+    const result = await server.callTool(tools[0].name, {});
+    return JSON.stringify(result);
+  } finally {
+    await server.cleanup();
+  }
 }

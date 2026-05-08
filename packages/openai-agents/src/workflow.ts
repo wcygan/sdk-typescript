@@ -7,6 +7,14 @@ export { activityAsTool, ToolSerializationError } from './workflow/tools';
 export type { ActivityToolDefinition, ActivityAsToolOptions, JsonObjectSchema } from './workflow/tools';
 export { statelessMcpServer } from './workflow/mcp-client';
 export type { StatelessMcpServerOptions, TemporalMCPServer, MCPPromptDefinition } from './workflow/mcp-client';
+export { statefulMcpServer } from './workflow/stateful-mcp-server';
+export {
+  StatefulMCPServerReference,
+  DEDICATED_WORKER_FAILURE_TYPE,
+  DEDICATED_WORKER_SCHEDULE_FAILURE_MESSAGE,
+  DEDICATED_WORKER_HEARTBEAT_FAILURE_MESSAGE,
+} from './workflow/stateful-mcp-client';
+export type { StatefulMcpServerOptions } from './workflow/stateful-mcp-client';
 export {
   isInWorkflow,
   isReplaying,

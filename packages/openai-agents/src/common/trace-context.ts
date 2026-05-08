@@ -10,7 +10,6 @@ import {
   Trace,
   getCurrentTrace,
   getGlobalTraceProvider,
-  setTracingDisabled,
   withTrace,
   setCurrentSpan,
   type CustomSpanData,
@@ -55,11 +54,6 @@ async function withTraceEvents<T>(
   spanId: string | null,
   fn: () => Promise<T>
 ): Promise<T> {
-  // @openai/agents-core disables tracing in three cases: NODE_ENV=test,
-  // browser environments, and OPENAI_AGENTS_DISABLE_TRACING=true.
-  // startTraces=true is an explicit user opt-in to processor events,
-  // so we override the library default before creating the trace.
-  setTracingDisabled(false);
   const trace = getGlobalTraceProvider().createTrace({ traceId, name: traceName });
   return withTrace(trace, async () => {
     if (spanId) {

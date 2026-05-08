@@ -38,16 +38,31 @@ export function agentSpanIdToOtelSpanId(agentSpanId: string): string {
 }
 
 /**
- * OTel ID generator that can be seeded with specific trace/span IDs.
- * When seeded, the next `generateTraceId()` or `generateSpanId()` call
- * returns the seeded value (FIFO). When the seed queue is empty, falls
- * through to a simple random hex generator.
+ * Forces OTel's `tracer.startSpan()` to emit a span with a pre-computed ID,
+ * transferring IDs from the agent SDK's ID space into OTel's. This is NOT a
+ * randomness substitute — Temporal's deterministic random handles workflow
+ * determinism elsewhere.
+ *
+ * The chain that makes this necessary:
+ *
+ * 1. Agent SDK chooses a span ID (deterministically, in workflow context).
+ * 2. Plugin converts that to an OTel-shaped ID via `agentSpanIdToOtelSpanId`.
+ * 3. Plugin needs OTel's `tracer.startSpan()` to emit a span with *that exact
+ *    ID* so the agent-side and OTel-side traces stitch into one tree.
+ * 4. OTel's `startSpan(name)` has no ID parameter — it always pulls from
+ *    `_idGenerator.generateSpanId()`.
+ * 5. Workaround: replace `_idGenerator` with this seedable variant, push the
+ *    computed ID onto the seed queue, and OTel consumes it on the next
+ *    `startSpan` call.
  *
  * Seeding is synchronous and consumed synchronously by `tracer.startSpan()`,
  * so there is no risk of async interleaving between seed and consumption
  * within a single processor call site.
+ *
+ * `randomHex` is a safety net, not the primary path — on the instrumented
+ * workflow path every `startSpan` is preceded by a seed.
  */
-export class SeedableIdGenerator {
+export class TemporalIdGenerator {
   private traceSeeds: string[] = [];
   private spanSeeds: string[] = [];
 
@@ -79,7 +94,7 @@ function randomHex(len: number): string {
 }
 
 /**
- * Replaces the `_idGenerator` on an OTel Tracer with a {@link SeedableIdGenerator}.
+ * Replaces the `_idGenerator` on an OTel Tracer with a {@link TemporalIdGenerator}.
  * Returns the installed generator so callers can seed it before `startSpan()`.
  *
  * The OTel SDK's `Tracer` stores its ID generator as an internal `_idGenerator`
@@ -87,8 +102,8 @@ function randomHex(len: number): string {
  * the TracerProvider's ID generator with a seedable variant is the only way
  * to make `tracer.startSpan()` produce deterministic IDs in the workflow sandbox.
  */
-export function installSeedableIdGenerator(tracer: unknown): SeedableIdGenerator {
-  const gen = new SeedableIdGenerator();
+export function installTemporalIdGenerator(tracer: unknown): TemporalIdGenerator {
+  const gen = new TemporalIdGenerator();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (tracer as any)._idGenerator = gen;
   return gen;

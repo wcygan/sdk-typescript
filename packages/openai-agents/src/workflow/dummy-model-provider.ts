@@ -2,30 +2,38 @@ import type { Model, ModelProvider, ModelRequest, ModelResponse, StreamEvent } f
 
 /**
  * A Model that throws if called. Used as a safety net — all model resolution
- * should go through ActivityBackedModel, so DummyModel should never be invoked.
+ * should go through ActivityBackedModel, so PlaceholderModel should never be invoked.
  */
-class DummyModel implements Model {
+class PlaceholderModel implements Model {
   async getResponse(_request: ModelRequest): Promise<ModelResponse> {
     throw new Error(
-      'DummyModel.getResponse should never be called. ' +
-        'All model calls should go through ActivityBackedModel via activities. ' +
-        'If you see this error, an agent has a model that was not replaced by convertAgent().'
+      'Temporal workflows must invoke OpenAI Agents models via activities. ' +
+        'Use `TemporalOpenAIRunner` from `@temporalio/openai-agents` to run agents ' +
+        'inside a workflow instead of invoking the agent directly.'
     );
   }
 
   // eslint-disable-next-line require-yield
   async *getStreamedResponse(_request: ModelRequest): AsyncIterable<StreamEvent> {
-    throw new Error('Streaming is not supported in Temporal workflows.');
+    throw new Error(
+      'Temporal workflows must invoke OpenAI Agents models via activities. ' +
+        'Use `TemporalOpenAIRunner` from `@temporalio/openai-agents` to run agents ' +
+        'inside a workflow instead of invoking the agent directly.'
+    );
   }
 }
 
 /**
- * A ModelProvider that returns DummyModel instances. Passed to the internal Runner
- * in workflow context to prevent real model providers (e.g. OpenAIProvider) from
- * being imported into the workflow sandbox.
+ * Inert ModelProvider used to satisfy the SDK Runner's required `modelProvider`
+ * parameter without letting the SDK construct its default `OpenAIProvider`.
+ * The default would be benign at runtime (its `getModel` is never called once
+ * `convertAgent` has replaced agent models with `ActivityBackedModel` instances),
+ * but constructing it pulls OpenAI client setup into the workflow's call path.
+ * This stub avoids that entirely. Should never be invoked — if it is, an agent
+ * escaped `convertAgent`'s traversal.
  */
-export class DummyModelProvider implements ModelProvider {
+export class PlaceholderModelProvider implements ModelProvider {
   getModel(_modelName?: string): Model {
-    return new DummyModel();
+    return new PlaceholderModel();
   }
 }

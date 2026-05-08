@@ -9,7 +9,12 @@ import {
   type ModelResponse,
   type StreamEvent,
 } from '@openai/agents-core';
-import { proxyActivities, proxyLocalActivities } from '@temporalio/workflow';
+import {
+  proxyActivities,
+  proxyLocalActivities,
+  type ActivityInterfaceFor,
+  type LocalActivityInterfaceFor,
+} from '@temporalio/workflow';
 import type { ActivityOptions, LocalActivityOptions } from '@temporalio/common';
 import type { ModelActivityOptions, ModelSummaryProvider } from '../common/model-activity-options';
 import {
@@ -104,7 +109,7 @@ interface ModelActivities {
  * go through the activity worker where real ModelProviders live.
  */
 export class ActivityBackedModel implements Model {
-  private readonly activities: ModelActivities;
+  private readonly activities: ActivityInterfaceFor<ModelActivities> | LocalActivityInterfaceFor<ModelActivities>;
   private readonly modelParams: ModelActivityOptions;
   private agent?: Agent<any, any>;
 
@@ -160,17 +165,7 @@ export class ActivityBackedModel implements Model {
         const provider = summaryOverride as ModelSummaryProvider;
         const systemInstructions = request.systemInstructions;
         const summary = provider.provide(this.agent, systemInstructions, request.input);
-        const activitiesWithOptions = this.activities as any;
-        if (typeof activitiesWithOptions.invokeModelActivity?.executeWithOptions !== 'function') {
-          throw new Error(
-            'ModelSummaryProvider requires executeWithOptions on the activity proxy, ' +
-              'but it is not available. Use a string summaryOverride instead, or ensure ' +
-              'the activity proxy supports per-call options.'
-          );
-        }
-        const wireResponse = (await activitiesWithOptions.invokeModelActivity.executeWithOptions({ summary }, [
-          input,
-        ])) as SerializedModelResponse;
+        const wireResponse = await this.activities.invokeModelActivity.executeWithOptions({ summary }, [input]);
         return fromSerializedModelResponse(wireResponse);
       }
 

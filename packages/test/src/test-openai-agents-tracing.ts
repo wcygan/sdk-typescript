@@ -1,3 +1,4 @@
+import { setTracingDisabled } from '@openai/agents-core';
 import * as otelApi from '@opentelemetry/api';
 import { ExportResultCode } from '@opentelemetry/core';
 import { BasicTracerProvider, SimpleSpanProcessor, type ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -18,6 +19,10 @@ import { FakeModelProvider, textResponse, toolCallResponse, handoffResponse } fr
 import * as agentActivities from './activities/openai-agents';
 import { bundlerOptions, RUN_INTEGRATION_TESTS, Worker } from './helpers';
 import { createTestWorkflowEnvironment } from './helpers-integration';
+
+// Tests opt back into agent-SDK tracing because upstream auto-disables it under NODE_ENV=test;
+// the production plugin defers to upstream's default.
+setTracingDisabled(false);
 
 // --- In-memory span collector + tree builder ---
 

@@ -505,6 +505,9 @@ importers:
       '@temporalio/plugin':
         specifier: workspace:*
         version: link:../plugin
+      '@temporalio/worker':
+        specifier: workspace:*
+        version: link:../worker
       '@temporalio/workflow':
         specifier: workspace:*
         version: link:../workflow
@@ -514,6 +517,9 @@ importers:
       headers-polyfill:
         specifier: ^4.0.3
         version: 4.0.3
+      openai:
+        specifier: ^6.0.0
+        version: 6.34.0(zod@3.25.76)
       web-streams-polyfill:
         specifier: ^4.2.0
         version: 4.2.0
@@ -668,6 +674,9 @@ importers:
       nexus-rpc:
         specifier: ^0.0.2
         version: 0.0.2
+      openai:
+        specifier: ^6.0.0
+        version: 6.34.0(zod@3.25.76)
       proto3-json-serializer:
         specifier: ^2.0.0
         version: 2.0.0

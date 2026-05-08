@@ -5,10 +5,15 @@ import {
   Agent,
   handoff,
   tool,
+  setTracingDisabled,
   type InputGuardrail,
   type OutputGuardrail,
   type TextOutput,
 } from '@openai/agents-core';
+
+// Tests opt back into agent-SDK tracing because upstream auto-disables it under NODE_ENV=test;
+// the production plugin defers to upstream's default.
+setTracingDisabled(false);
 import {
   condition,
   defineQuery,

@@ -1,10 +1,16 @@
 /**
  * Test OpenAI Agents SDK integration with Temporal workflows
  */
-import { withTrace } from '@openai/agents-core';
+import { setTracingDisabled, withTrace } from '@openai/agents-core';
+import { APIError } from 'openai';
+
+// Tests opt back into agent-SDK tracing because upstream auto-disables it under NODE_ENV=test;
+// the production plugin defers to upstream's default.
+setTracingDisabled(false);
 import {
   OpenAIAgentsPlugin,
   StatelessMCPServerProvider,
+  StatefulMCPServerProvider,
   toSerializedModelResponse,
   OpenAIAgentsTraceClientInterceptor,
 } from '@temporalio/openai-agents';
@@ -64,6 +70,12 @@ import {
   signalTracePropagationParentWorkflow,
   childWorkflowTracePropagationParentWorkflow,
   deterministicTraceIdsWorkflow,
+  statefulMcpNoWorkerWorkflow,
+  statefulMcpAgentWorkflow,
+  statefulMcpNotConnectedWorkflow,
+  statefulMcpIsolationWorkflow,
+  statefulMcpHeartbeatTimeoutWorkflow,
+  statefulMcpReplayWorkflow,
 } from './workflows/openai-agents';
 import { helpers, makeTestFunction } from './helpers-integration';
 import {
@@ -263,11 +275,8 @@ test('Model invocations are scheduled as activities', async (t) => {
 test('Handles model errors gracefully', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  // Create an error with a 400 status so isRetryableError returns false (non-retryable)
-  const modelError = new Error('Model API error');
-  Object.assign(modelError, {
-    response: { status: 400, headers: { get: () => undefined } },
-  });
+  // Create an APIError with a 400 status (non-retryable)
+  const modelError = new APIError(400, undefined, 'Model API error', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -475,10 +484,7 @@ test('Local activity mode uses local activities for model calls', async (t) => {
 test('Retryable 429 error is classified as retryable (nonRetryable=false)', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error429 = new Error('Rate limit exceeded');
-  Object.assign(error429, {
-    response: { status: 429, headers: { get: () => undefined } },
-  });
+  const error429 = new APIError(429, undefined, 'Rate limit exceeded', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -524,10 +530,7 @@ test('Retryable 429 error is classified as retryable (nonRetryable=false)', asyn
 test('Non-retryable 400 error fails without retry', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error400 = new Error('Bad request: invalid prompt');
-  Object.assign(error400, {
-    response: { status: 400, headers: { get: () => undefined } },
-  });
+  const error400 = new APIError(400, undefined, 'Bad request: invalid prompt', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -840,8 +843,7 @@ test('Non-string agent.model throws AgentsWorkflowError', async (t) => {
 test('SDK-shape 429 (error.status) classified as retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const sdkError429 = new Error('Rate limit exceeded');
-  Object.assign(sdkError429, { status: 429, headers: {} });
+  const sdkError429 = new APIError(429, undefined, 'Rate limit exceeded', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -874,8 +876,7 @@ test('SDK-shape 429 (error.status) classified as retryable', async (t) => {
 test('SDK-shape 400 (error.status) classified as non-retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const sdkError400 = new Error('Bad request: invalid parameters');
-  Object.assign(sdkError400, { status: 400, headers: {} });
+  const sdkError400 = new APIError(400, undefined, 'Bad request: invalid parameters', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -909,11 +910,8 @@ test('SDK-shape 400 (error.status) classified as non-retryable', async (t) => {
 test('retry-after-ms header sets nextRetryDelay on activity failure', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error429 = new Error('Rate limited');
-  Object.assign(error429, {
-    status: 429,
-    headers: { get: (k: string) => (k === 'retry-after-ms' ? '5000' : undefined) },
-  });
+  const headers = new Headers({ 'retry-after-ms': '5000' });
+  const error429 = new APIError(429, undefined, 'Rate limited', headers);
 
   const worker = await createWorker({
     plugins: [
@@ -1145,8 +1143,7 @@ test('EventTarget polyfill sets event.target and event.currentTarget', async (t)
 test('429 error produces ModelInvocationError.RateLimit type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error429 = new Error('Rate limit exceeded');
-  Object.assign(error429, { status: 429, headers: {} });
+  const error429 = new APIError(429, undefined, 'Rate limit exceeded', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -1177,8 +1174,7 @@ test('429 error produces ModelInvocationError.RateLimit type', async (t) => {
 test('401 error produces ModelInvocationError.Authentication type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error401 = new Error('Unauthorized');
-  Object.assign(error401, { status: 401, headers: {} });
+  const error401 = new APIError(401, undefined, 'Unauthorized', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -1213,8 +1209,7 @@ test('401 error produces ModelInvocationError.Authentication type', async (t) =>
 test('400 error produces ModelInvocationError.BadRequest type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error400 = new Error('Bad request');
-  Object.assign(error400, { status: 400, headers: {} });
+  const error400 = new APIError(400, undefined, 'Bad request', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -1245,8 +1240,7 @@ test('400 error produces ModelInvocationError.BadRequest type', async (t) => {
 test('500 error produces ModelInvocationError.ServerError type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error500 = new Error('Internal server error');
-  Object.assign(error500, { status: 500, headers: {} });
+  const error500 = new APIError(500, undefined, 'Internal server error', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -1274,7 +1268,7 @@ test('500 error produces ModelInvocationError.ServerError type', async (t) => {
   });
 });
 
-test('Non-Error non-object throw produces non-retryable failure', async (t) => {
+test('Non-Error non-object throw produces retryable failure (defers to Temporal retry policy)', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -1286,7 +1280,7 @@ test('Non-Error non-object throw produces non-retryable failure', async (t) => {
   });
 
   await worker.runUntil(async () => {
-    const handle = await startWorkflow(basicAgentWorkflow, {
+    const handle = await startWorkflow(retryableModelWorkflow, {
       args: ['Hello'],
       workflowExecutionTimeout: '30 seconds',
     });
@@ -1301,13 +1295,10 @@ test('Non-Error non-object throw produces non-retryable failure', async (t) => {
     const failedEvents = events?.filter((e) => e.eventType === EventType.EVENT_TYPE_ACTIVITY_TASK_FAILED) ?? [];
     t.true(failedEvents.length >= 1, 'Expected at least one activity failure');
     const failure = failedEvents[0]?.activityTaskFailedEventAttributes?.failure;
-    t.true(
+    t.falsy(
       failure?.applicationFailureInfo?.nonRetryable,
-      'Expected non-object throw to be classified as non-retryable'
+      'Expected non-APIError throw to be retryable (nonRetryable=false, defers to retry policy)'
     );
-    // Should only have 1 attempt (non-retryable = no retries)
-    const startedEvents = events?.filter((e) => e.eventType === EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED) ?? [];
-    t.is(startedEvents.length, 1, `Expected 1 attempt for non-retryable, got ${startedEvents.length}`);
   });
 });
 
@@ -1668,10 +1659,7 @@ test('Testing namespace exports are importable', async (t) => {
 test('Retryable 429 error exhausts retry policy (retryState=MAXIMUM_ATTEMPTS_REACHED)', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error429 = new Error('Rate limit exceeded');
-  Object.assign(error429, {
-    response: { status: 429, headers: { get: () => undefined } },
-  });
+  const error429 = new APIError(429, undefined, 'Rate limit exceeded', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -1939,8 +1927,7 @@ test('convertAgent does not mutate original Handoff objects', async (t) => {
 test('408 Timeout error produces ModelInvocationError.Timeout type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error408 = new Error('Request timeout');
-  Object.assign(error408, { status: 408, headers: {} });
+  const error408 = new APIError(408, undefined, 'Request timeout', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -1975,8 +1962,7 @@ test('408 Timeout error produces ModelInvocationError.Timeout type', async (t) =
 test('409 Conflict error produces ModelInvocationError.Conflict type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error409 = new Error('Conflict');
-  Object.assign(error409, { status: 409, headers: {} });
+  const error409 = new APIError(409, undefined, 'Conflict', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -2011,8 +1997,7 @@ test('409 Conflict error produces ModelInvocationError.Conflict type', async (t)
 test('422 error produces ModelInvocationError.BadRequest type', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error422 = new Error('Unprocessable entity');
-  Object.assign(error422, { status: 422, headers: {} });
+  const error422 = new APIError(422, undefined, 'Unprocessable entity', new Headers());
 
   const worker = await createWorker({
     plugins: [
@@ -2047,11 +2032,8 @@ test('422 error produces ModelInvocationError.BadRequest type', async (t) => {
 test('x-should-retry true overrides non-retryable 400 to retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error400WithRetry = new Error('Bad request but should retry');
-  Object.assign(error400WithRetry, {
-    status: 400,
-    headers: { get: (k: string) => (k === 'x-should-retry' ? 'true' : undefined) },
-  });
+  const headers = new Headers({ 'x-should-retry': 'true' });
+  const error400WithRetry = new APIError(400, undefined, 'Bad request but should retry', headers);
 
   const worker = await createWorker({
     plugins: [
@@ -2081,7 +2063,7 @@ test('x-should-retry true overrides non-retryable 400 to retryable', async (t) =
   });
 });
 
-test('Plain Error without HTTP status is non-retryable', async (t) => {
+test('Plain Error without HTTP status is retryable (defers to Temporal retry policy)', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
   const worker = await createWorker({
@@ -2105,24 +2087,18 @@ test('Plain Error without HTTP status is non-retryable', async (t) => {
     const failedEvents = events?.filter((e) => e.eventType === EventType.EVENT_TYPE_ACTIVITY_TASK_FAILED) ?? [];
     t.true(failedEvents.length >= 1, 'Expected at least one activity failure');
     const failure = failedEvents[0]?.activityTaskFailedEventAttributes?.failure;
-    t.true(
+    t.falsy(
       failure?.applicationFailureInfo?.nonRetryable,
-      'Expected plain Error (no HTTP status) to be classified as non-retryable'
+      'Expected plain Error (no HTTP status / non-APIError) to be retryable (nonRetryable=false)'
     );
-
-    const startedEvents = events?.filter((e) => e.eventType === EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED) ?? [];
-    t.is(startedEvents.length, 1, `Expected 1 attempt for non-retryable, got ${startedEvents.length}`);
   });
 });
 
 test('x-should-retry false overrides retryable 429 to non-retryable', async (t) => {
   const { createWorker, startWorkflow } = helpers(t);
 
-  const error429NoRetry = new Error('Rate limit but do not retry');
-  Object.assign(error429NoRetry, {
-    status: 429,
-    headers: { get: (k: string) => (k === 'x-should-retry' ? 'false' : undefined) },
-  });
+  const headers = new Headers({ 'x-should-retry': 'false' });
+  const error429NoRetry = new APIError(429, undefined, 'Rate limit but do not retry', headers);
 
   const worker = await createWorker({
     plugins: [
@@ -2802,5 +2778,243 @@ test('Trace/span IDs and timestamps are deterministic across replay', async (t) 
         `Span startedAt '${ts}' should be a valid ISO 8601 timestamp (from timeIso())`
       );
     }
+  });
+});
+
+// --- Stateful MCP ---
+
+test('Stateful MCP: not connected produces ApplicationFailure', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(statefulMcpNotConnectedWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+    t.is(result, 'Stateful MCP Server not connected. Call connect first.');
+  });
+});
+
+test('Stateful MCP: no dedicated worker produces DedicatedWorkerFailure', async (t) => {
+  const { createWorker, startWorkflow } = helpers(t);
+
+  // Override the session activity to just sleep (no dedicated worker started)
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+      }),
+    ],
+    activities: {
+      // Override: session activity that does nothing useful — no dedicated worker is started.
+      // The workflow's listTools call will time out on scheduleToStart because
+      // no worker is polling the per-run task queue.
+      'testStateful-stateful-server-session': async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+      },
+    },
+  });
+
+  await worker.runUntil(async () => {
+    const handle = await startWorkflow(statefulMcpNoWorkerWorkflow, {
+      args: [1000],
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    const result = await handle.result();
+    t.is(result, 'DedicatedWorkerFailure: MCP Stateful Server Worker failed to schedule activity.');
+  });
+});
+
+test('Stateful MCP: happy path with agent', async (t) => {
+  const { createWorker, startWorkflow } = helpers(t);
+
+  const mcpProvider = new StatefulMCPServerProvider(
+    'testStateful',
+    () => ({
+      async connect() {},
+      async cleanup() {},
+      async listTools() {
+        return [
+          {
+            name: 'get_status',
+            description: 'Returns status',
+            inputSchema: { type: 'object' as const, properties: {}, required: [] as string[], additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: 'text', text: 'status-ok' }];
+      },
+    }),
+    t.context.env.nativeConnection
+  );
+
+  function* statefulMcpGenerator() {
+    yield toolCallResponse('get_status', {});
+    yield textResponse('Status is ok.');
+  }
+
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider(() => statefulMcpGenerator()),
+        mcpServerProviders: [mcpProvider],
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const handle = await startWorkflow(statefulMcpAgentWorkflow, {
+      args: ['Check the status'],
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    const result = await handle.result();
+    t.is(result, 'Status is ok.');
+  });
+});
+
+test('Stateful MCP: multi-run isolation under reuseV8Context', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  let callCount = 0;
+  const mcpProvider = new StatefulMCPServerProvider(
+    'isolationTest',
+    () => {
+      // Each factory call produces a server with a unique marker
+      const marker = `server-${++callCount}`;
+      return {
+        async connect() {},
+        async cleanup() {},
+        async listTools() {
+          return [
+            {
+              name: 'get_marker',
+              description: 'Returns marker',
+              inputSchema: { type: 'object' as const, properties: {}, required: [] as string[], additionalProperties: false },
+            },
+          ];
+        },
+        async callTool() {
+          return [{ type: 'text', text: marker }];
+        },
+      };
+    },
+    t.context.env.nativeConnection
+  );
+
+  const worker = await createWorker({
+    reuseV8Context: true,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+        mcpServerProviders: [mcpProvider],
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const resultA = await executeWorkflow(statefulMcpIsolationWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+    const resultB = await executeWorkflow(statefulMcpIsolationWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    // Each workflow must have gotten its own server instance
+    t.not(resultA, resultB, 'Two runs on the same V8 isolate must see distinct server instances');
+    t.regex(resultA, /server-1/, 'First run should see server-1');
+    t.regex(resultB, /server-2/, 'Second run should see server-2');
+  });
+});
+
+test('Stateful MCP: heartbeat timeout produces DedicatedWorkerFailure', async (t) => {
+  const { createWorker, startWorkflow } = helpers(t);
+
+  const mcpProvider = new StatefulMCPServerProvider(
+    'heartbeatTest',
+    () => ({
+      async connect() {},
+      async cleanup() {},
+      async listTools(): Promise<any[]> {
+        // Block long enough for the 1-second heartbeat timeout to fire
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+        return [];
+      },
+      async callTool() {
+        return [];
+      },
+    }),
+    t.context.env.nativeConnection
+  );
+
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+        mcpServerProviders: [mcpProvider],
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const handle = await startWorkflow(statefulMcpHeartbeatTimeoutWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    const result = await handle.result();
+    t.is(result, 'DedicatedWorkerFailure: MCP Stateful Server Worker failed to heartbeat.');
+  });
+});
+
+test('Stateful MCP: replay safety with maxCachedWorkflows 0', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const mcpProvider = new StatefulMCPServerProvider(
+    'replayTest',
+    () => ({
+      async connect() {},
+      async cleanup() {},
+      async listTools() {
+        return [
+          {
+            name: 'get_data',
+            description: 'Returns data',
+            inputSchema: { type: 'object' as const, properties: {}, required: [] as string[], additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: 'text', text: 'replay-safe-data' }];
+      },
+    }),
+    t.context.env.nativeConnection
+  );
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+        mcpServerProviders: [mcpProvider],
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    const result = await executeWorkflow(statefulMcpReplayWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    // If replay caused NondeterminismError, the workflow would fail instead of returning
+    t.regex(result, /replay-safe-data/, 'Workflow must complete without NondeterminismError');
   });
 });
