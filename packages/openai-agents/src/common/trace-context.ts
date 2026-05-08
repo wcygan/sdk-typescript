@@ -16,9 +16,16 @@ import {
 } from '@openai/agents-core';
 import type { AgentsSpanHeader } from './trace-header';
 
-// Stable cross-package contract symbol from @openai/agents-core.
-// The library stores a single AsyncLocalStorage instance on globalThis under
-// this symbol to share trace context across duplicate package installations.
+// PUBLIC contract: `Symbol.for('openai.agents.core.asyncLocalStorage')` is the
+// well-known symbol upstream uses to share a single AsyncLocalStorage
+// instance across duplicate package installations under it on globalThis.
+//
+// PRIVATE reach-in: the store shape `{ trace, span, active: true }` passed to
+// `als.run()` below is upstream's undocumented internal context shape. It is
+// NOT part of a public contract. If upstream renames `active`, adds a required
+// field, or restructures the store, this breaks silently. A runtime smoke check
+// in `ensureTracingProcessorRegistered` (workflow/tracing.ts) guards against
+// drift — it verifies the round-trip at plugin init and fails loudly.
 const AGENTS_CORE_ALS_SYMBOL = Symbol.for('openai.agents.core.asyncLocalStorage');
 
 export interface RestoreTraceContextOptions {

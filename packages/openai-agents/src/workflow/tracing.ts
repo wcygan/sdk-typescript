@@ -1,6 +1,7 @@
-import { addTraceProcessor, getGlobalTraceProvider } from '@openai/agents-core';
+import { addTraceProcessor, getCurrentTrace, getGlobalTraceProvider, Trace } from '@openai/agents-core';
 import { inWorkflowContext, workflowInfo, uuid4, log } from '@temporalio/workflow';
 import { BaseAgentTracingProcessor, type SpanEntry } from '../common/base-tracing-processor';
+import { TemporalIdGenerator } from '../common/tracing-bridge';
 
 // --- Workflow context helpers ---
 
@@ -50,9 +51,10 @@ export interface TemporalTracingProcessorOptions {
  *    the upstream TraceProvider's `createTrace`/`createSpan` methods to inject
  *    IDs from `workflow.uuid4()` — a per-workflow seeded PRNG. This is immune
  *    to upstream changes in ID generation strategy.
- * 2. **Polyfill** (belt-and-suspenders): `load-polyfills.ts` replaces
- *    `crypto.randomUUID` with `uuid4()`. Catches any remaining `randomUUID`
- *    calls from upstream that bypass the TraceProvider.
+ * 2. **Polyfill** (belt-and-suspenders): `@temporalio/workflow/polyfills`
+ *    (loaded by `load-polyfills.ts`) replaces `crypto.randomUUID` with
+ *    `uuid4()`. Catches any remaining `randomUUID` calls from upstream that
+ *    bypass the TraceProvider.
  *
  * OTel trace/span IDs are derived deterministically from agent SDK IDs
  * using {@link agentTraceIdToOtelTraceId} and {@link agentSpanIdToOtelSpanId}.
@@ -62,12 +64,9 @@ export interface TemporalTracingProcessorOptions {
  * from both sides share the same trace ID and form a single trace tree.
  *
  * **Timestamps**: The Temporal V8 sandbox replaces `Date` with a deterministic
- * clock. Upstream's only clock source is `timeIso()` in
- * `@openai/agents-core/dist/tracing/utils.js`, which calls
- * `new Date().toISOString()`. No `performance.now`, `hrtime`, or other clock
- * APIs are used. If a future upstream version introduces a non-Date clock
- * source, timestamps would diverge on replay and an explicit override
- * (like `installDeterministicTraceIds` for IDs) would be needed.
+ * clock, which covers upstream's timestamp generation. If a future upstream
+ * version introduces a non-Date clock source (e.g. `performance.now`),
+ * timestamps could diverge on replay and an explicit override would be needed.
  */
 export class TemporalTracingProcessor extends BaseAgentTracingProcessor {
   /**
@@ -78,7 +77,15 @@ export class TemporalTracingProcessor extends BaseAgentTracingProcessor {
   private readonly spans = new Map<string, Map<string, SpanEntry>>();
 
   constructor(_options?: TemporalTracingProcessorOptions) {
-    super();
+    // The workflow V8 sandbox does not bundle `@opentelemetry/sdk-trace-base`'s
+    // `BasicTracerProvider`, so a `ReplaySafeTracerProvider` cannot be
+    // constructed here. Instead, write the generator directly onto the
+    // tracer's internal `_idGenerator` field — the same field
+    // `BasicTracerProvider` uses on the host side.
+    const idGen = new TemporalIdGenerator();
+    super(idGen);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (this.tracer as any)._idGenerator = idGen;
   }
 
   private getWorkflowSpans(): Map<string, SpanEntry> {
@@ -128,7 +135,7 @@ const IDS_INSTALLED_KEY = Symbol.for('temporal-openai-agents-deterministic-ids')
  * Wraps the upstream TraceProvider's `createTrace` and `createSpan` methods
  * to inject deterministic IDs from `workflow.uuid4()`. This is the primary
  * defense against replay non-determinism in trace/span IDs — the polyfill
- * in `load-polyfills.ts` is a secondary safety net.
+ * in `@temporalio/workflow/polyfills` is a secondary safety net.
  */
 function installDeterministicTraceIds(): void {
   if ((globalThis as any)[IDS_INSTALLED_KEY]) return;
@@ -158,8 +165,8 @@ function installDeterministicTraceIds(): void {
 
 /**
  * Appends a {@link TemporalTracingProcessor} to the OpenAI Agents SDK's
- * global processor list, enables tracing, installs deterministic ID
- * generation, and stores interceptor config on `globalThis`.
+ * global processor list, enables deterministic ID generation, and stores
+ * interceptor config on `globalThis`.
  *
  * **Side effects**:
  * - Mutates the upstream TraceProvider (processor list + createTrace/createSpan)
@@ -189,4 +196,57 @@ export function ensureTracingProcessorRegistered(options?: TemporalTracingProces
 
   addTraceProcessor(new TemporalTracingProcessor(options));
   installDeterministicTraceIds();
+  verifyAlsContextShape();
+}
+
+// --- ALS context shape smoke check ---
+
+const AGENTS_CORE_ALS_SYMBOL = Symbol.for('openai.agents.core.asyncLocalStorage');
+
+/**
+ * Verify that upstream's undocumented ALS store shape `{ trace, span, active }`
+ * still works as expected. The plugin reaches into this shape to set trace
+ * context without firing processor events (see common/trace-context.ts).
+ *
+ * Runs once at plugin init. If upstream renames `active`, restructures the
+ * store, or changes how `getCurrentTrace()` reads it, this fails loudly
+ * instead of silently losing trace context at runtime.
+ */
+function verifyAlsContextShape(): void {
+  // Force ALS initialization — getCurrentTrace() triggers lazy creation of
+  // the AsyncLocalStorage instance on globalThis.
+  getCurrentTrace();
+
+  const als = (globalThis as any)[AGENTS_CORE_ALS_SYMBOL] as
+    | { run: <R>(store: unknown, callback: () => R) => R }
+    | undefined;
+
+  if (!als) {
+    // If ALS isn't available, the plugin's trace propagation is already
+    // degraded (withContextOnly falls back to running fn directly). Not an
+    // error — just nothing to verify.
+    return;
+  }
+
+  const sentinel = new Trace({ traceId: 'smoke-check', name: 'smoke-check' });
+
+  // Manually save/restore the ALS store: the workflow bundle picks an upstream shim
+  // whose `run()` doesn't restore context, so the sentinel would otherwise persist
+  // across subsequent workflow executions sharing the V8 isolate.
+  const prev = (als as any).getStore?.();
+  let retrieved: unknown;
+  try {
+    retrieved = als.run({ trace: sentinel, span: undefined, active: true }, () => getCurrentTrace());
+  } finally {
+    if ((als as any).enterWith) (als as any).enterWith(prev);
+  }
+
+  if (retrieved !== sentinel) {
+    throw new Error(
+      "@temporalio/openai-agents: agent SDK ALS context shape has drifted. " +
+        "The plugin reached into upstream's internal context shape (`{ trace, span, active }`); " +
+        'one of those fields is no longer set or no longer load-bearing. ' +
+        'Open an issue against @temporalio/openai-agents.'
+    );
+  }
 }

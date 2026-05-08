@@ -86,7 +86,6 @@ async function withInjectedHeader<I extends { headers: Headers }, T>(
 /**
  * Workflow inbound interceptor that restores OpenAI Agents trace context
  * from propagated headers on workflow execute, signal, query, and update.
- *
  */
 export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCallsInterceptor {
   async execute(input: WorkflowExecuteInput, next: Next<WorkflowInboundCallsInterceptor, 'execute'>): Promise<unknown> {
@@ -121,10 +120,21 @@ export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCalls
   }
 
   async handleQuery(input: QueryInput, next: Next<WorkflowInboundCallsInterceptor, 'handleQuery'>): Promise<unknown> {
-    // Queries are read-only and don't carry propagated trace context.
-    return maybeTemporalSpan('temporal:handleQuery', () => next(input), {
-      queryName: input.queryName,
-    });
+    const header = extractAgentsTraceHeader(input.headers);
+    if (!header?.traceId) {
+      return maybeTemporalSpan('temporal:handleQuery', () => next(input), {
+        queryName: input.queryName,
+      });
+    }
+
+    return withRestoredAgentsTraceContext(
+      header,
+      () =>
+        maybeTemporalSpan('temporal:handleQuery', () => next(input), {
+          queryName: input.queryName,
+        }),
+      { startTraces: getTracingConfig().startTraces }
+    );
   }
 
   validateUpdate(input: UpdateInput, next: Next<WorkflowInboundCallsInterceptor, 'validateUpdate'>): void {
@@ -157,7 +167,6 @@ export class OpenAIAgentsTraceInboundInterceptor implements WorkflowInboundCalls
  * `OpenAIAgentsTraceActivityInboundInterceptor`) and the
  * workflow→child-workflow / workflow→signal boundaries (paired with
  * `OpenAIAgentsTraceInboundInterceptor`).
- *
  */
 export class OpenAIAgentsTraceOutboundInterceptor implements WorkflowOutboundCallsInterceptor {
   async scheduleActivity(

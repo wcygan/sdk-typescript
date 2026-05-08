@@ -1,10 +1,5 @@
 /**
  * @temporalio/openai-agents — Temporal integration for the OpenAI Agents SDK.
- *
- * Deferred (not in this package):
- * - nexusOperationAsTool — TS SDK lacks executeNexusOperation; add when available
- * - testing.AgentEnvironment — richer test harness beyond FakeModel
- * - workflowFailureExceptionTypes registration (TS SDK doesn't support)
  */
 
 export { OpenAIAgentsPlugin } from './worker/plugin';
@@ -44,5 +39,9 @@ export type { OpenAIAgentsTraceInterceptorOptions } from './worker/trace-interce
 export { OpenAIAgentsTraceClientInterceptor } from './client/trace-interceptor';
 export type { OpenAIAgentsTraceClientInterceptorOptions } from './client/trace-interceptor';
 export { AGENTS_TRACE_HEADER_KEY, type AgentsSpanHeader } from './common/trace-header';
+
+export { createTracerProvider, ReplaySafeTracerProvider } from './tracer-provider';
+export type { CreateTracerProviderOptions } from './tracer-provider';
+export { TemporalIdGenerator } from './common/tracing-bridge';
 
 export * as testing from './worker/testing';

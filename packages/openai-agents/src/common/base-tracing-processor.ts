@@ -29,8 +29,7 @@ import {
   dynamicAttributesFromSpanData,
   agentTraceIdToOtelTraceId,
   agentSpanIdToOtelSpanId,
-  installTemporalIdGenerator,
-  type TemporalIdGenerator,
+  TemporalIdGenerator,
 } from './tracing-bridge';
 
 export interface SpanEntry {
@@ -56,28 +55,52 @@ export abstract class BaseAgentTracingProcessor implements TracingProcessor {
   protected readonly tracer: otel.Tracer;
   protected readonly idGen: TemporalIdGenerator;
 
-  constructor() {
+  /**
+   * @param idGenerator - If provided, used directly (workflow side creates
+   *   its own). If omitted, the constructor reads the global OTel
+   *   TracerProvider — if it exposes a `temporalIdGenerator` getter
+   *   (i.e. it's a `ReplaySafeTracerProvider`), uses that generator.
+   *   If no provider is registered (default no-op), falls back to a
+   *   default `TemporalIdGenerator`. If a non-`ReplaySafeTracerProvider`
+   *   was explicitly registered (e.g. a plain `BasicTracerProvider`),
+   *   throws a descriptive error.
+   */
+  constructor(idGenerator?: TemporalIdGenerator) {
+    if (idGenerator) {
+      this.idGen = idGenerator;
+    } else {
+      // Activity/host side: try to read from the global provider.
+      // OTel API wraps the real provider in a ProxyTracerProvider; unwrap it.
+      const raw = otel.trace.getTracerProvider();
+      const provider = typeof (raw as any).getDelegate === 'function' ? (raw as any).getDelegate() : raw;
+      if (provider && typeof (provider as any).temporalIdGenerator !== 'undefined') {
+        // ReplaySafeTracerProvider — use its generator.
+        this.idGen = (provider as any).temporalIdGenerator;
+      } else if (provider && typeof (provider as any).addSpanProcessor === 'function') {
+        // A real TracerProvider (e.g. BasicTracerProvider) was registered
+        // but it's not a ReplaySafeTracerProvider. This is a user error.
+        throw new Error(
+          '@temporalio/openai-agents: the global TracerProvider must be a ReplaySafeTracerProvider. ' +
+            'Use `createTracerProvider()` from @temporalio/openai-agents and pass it to ' +
+            '`trace.setGlobalTracerProvider(...)` before initializing the plugin. ' +
+            'See the package README for the wiring pattern.'
+        );
+      } else {
+        // No real provider registered (default no-op). Fall back silently.
+        this.idGen = new TemporalIdGenerator();
+      }
+    }
     this.tracer = otel.trace.getTracer(TRACER_NAME);
-    this.idGen = installTemporalIdGenerator(this.tracer);
   }
 
   /**
-   * Look up a span entry by its agent SDK span/trace ID.
-   *
-   * The workflow-side subclass keys spans by `(workflowId, spanId)` to
-   * isolate concurrent workflows sharing the same V8 isolate under
-   * `reuseV8Context: true`. The activity-side subclass uses a flat map
-   * since each activity execution is independent.
+   * Look up a span entry by its agent SDK span/trace ID. Subclasses
+   * determine the scoping strategy.
    */
   protected abstract getEntry(spanId: string): SpanEntry | undefined;
 
   /**
-   * Store a span entry.
-   *
-   * The workflow-side subclass nests entries under the current workflow ID
-   * so that `reuseV8Context: true` isolates never leak spans across
-   * concurrent workflow runs. The activity-side subclass stores entries in
-   * a flat map.
+   * Store a span entry. Subclasses determine the scoping strategy.
    */
   protected abstract setEntry(spanId: string, entry: SpanEntry): void;
 

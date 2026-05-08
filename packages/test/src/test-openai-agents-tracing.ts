@@ -7,7 +7,12 @@ import { SEMRESATTRS_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import test from 'ava';
 import { v4 as uuid4 } from 'uuid';
 import { OpenTelemetryPlugin } from '@temporalio/interceptors-opentelemetry';
-import { OpenAIAgentsPlugin, StatelessMCPServerProvider } from '@temporalio/openai-agents';
+import {
+  OpenAIAgentsPlugin,
+  StatelessMCPServerProvider,
+  createTracerProvider,
+  ReplaySafeTracerProvider,
+} from '@temporalio/openai-agents';
 import { DefaultLogger, Runtime, bundleWorkflowCode } from '@temporalio/worker';
 import {
   comprehensiveAgentWorkflow,
@@ -211,10 +216,14 @@ function createMcpProvider(): StatelessMCPServerProvider {
 
 // --- Shared OTel + plugin setup ---
 
-function createOtelContext(): { spans: ReadableSpan[]; provider: BasicTracerProvider; otelPlugin: OpenTelemetryPlugin } {
+function createOtelContext(): {
+  spans: ReadableSpan[];
+  provider: ReplaySafeTracerProvider;
+  otelPlugin: OpenTelemetryPlugin;
+} {
   const spans: ReadableSpan[] = [];
   const resource = new opentelemetry.resources.Resource({ [SEMRESATTRS_SERVICE_NAME]: 'test-tracing' });
-  const provider = new BasicTracerProvider({ resource });
+  const provider = createTracerProvider({ resource });
   provider.addSpanProcessor(
     new SimpleSpanProcessor({
       export(exportedSpans, resultCallback) {
@@ -224,7 +233,7 @@ function createOtelContext(): { spans: ReadableSpan[]; provider: BasicTracerProv
       async shutdown() {},
     })
   );
-  provider.register();
+  otelApi.trace.setGlobalTracerProvider(provider);
 
   const otelPlugin = new OpenTelemetryPlugin({
     resource,
@@ -659,3 +668,45 @@ if (RUN_INTEGRATION_TESTS) {
     }
   });
 }
+
+// --- Unit test: loud error when global provider is not ReplaySafeTracerProvider ---
+
+test('throws descriptive error when global TracerProvider is not ReplaySafeTracerProvider', (t) => {
+  // Register a plain BasicTracerProvider (not via createTracerProvider)
+  const plainProvider = new BasicTracerProvider();
+  otelApi.trace.setGlobalTracerProvider(plainProvider);
+
+  try {
+    // Access the internal module via resolved absolute path to bypass
+    // the package exports map. This is intentional — the constructor
+    // check lives in an abstract base class not exported publicly.
+    const basePath = require.resolve('@temporalio/openai-agents');
+    const processorPath = basePath.replace(/lib[/\\]index\.js$/, 'lib/common/base-tracing-processor.js');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { BaseAgentTracingProcessor } = require(processorPath);
+
+    class TestProcessor extends BaseAgentTracingProcessor {
+      getEntry() {
+        return undefined;
+      }
+      setEntry() {}
+      deleteEntry() {}
+      *allEntries(): Iterable<unknown> {}
+      clearAllEntries() {}
+    }
+
+    const err = t.throws(() => new TestProcessor(), {
+      instanceOf: Error,
+    });
+    t.true(
+      err!.message.includes('ReplaySafeTracerProvider'),
+      'Error message should mention ReplaySafeTracerProvider'
+    );
+    t.true(
+      err!.message.includes('createTracerProvider()'),
+      'Error message should mention the factory function'
+    );
+  } finally {
+    otelApi.trace.disable();
+  }
+});

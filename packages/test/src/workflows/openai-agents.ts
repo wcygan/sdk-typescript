@@ -21,6 +21,7 @@ import { webSearchTool } from '@openai/agents-openai';
 import {
   ApplicationFailure,
   condition,
+  defineQuery,
   defineSignal,
   executeChild,
   proxyActivities,
@@ -1266,6 +1267,7 @@ export async function clientToWorkflowTraceWorkflow(): Promise<string> {
 }
 
 const traceTestSignal = defineSignal('traceTestSignal');
+const queryTraceTestDone = defineSignal('queryTraceTestDone');
 
 export async function signalTracePropagationParentWorkflow(): Promise<{
   parentTraceId: string;
@@ -1486,4 +1488,43 @@ export async function statefulMcpReplayWorkflow(): Promise<string> {
   } finally {
     await server.cleanup();
   }
+}
+
+/**
+ * Triggers ensureTracingProcessorRegistered (and its ALS context shape
+ * smoke check) by constructing a TemporalOpenAIRunner, then returns
+ * 'ok' if no error was thrown.
+ */
+export async function alsContextShapeSmokeCheckWorkflow(): Promise<string> {
+  new TemporalOpenAIRunner();
+  return 'ok';
+}
+
+/**
+ * Returns the traceId from getCurrentTrace() at workflow start, before any
+ * agent operations. Used to detect ALS context leaks between workflows.
+ */
+export async function alsLeakDetectionWorkflow(): Promise<string | null> {
+  const trace = getCurrentTrace();
+  return trace?.traceId ?? null;
+}
+
+// --- Query trace context propagation ---
+
+const queryTraceIdQuery = defineQuery<string>('queryTraceId');
+
+export async function queryTracePropagationWorkflow(): Promise<string> {
+  new TemporalOpenAIRunner();
+
+  setHandler(queryTraceIdQuery, () => {
+    return getCurrentTrace()?.traceId ?? 'NO_QUERY_TRACE';
+  });
+
+  let done = false;
+  setHandler(queryTraceTestDone, () => {
+    done = true;
+  });
+
+  await condition(() => done, '30 seconds');
+  return 'done';
 }

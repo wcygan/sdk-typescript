@@ -20,11 +20,36 @@
   "author": "Temporal Technologies Inc. <sdk@temporal.io>",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "require": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./polyfills": {
+      "types": "./lib/polyfills.d.ts",
+      "import": "./lib/polyfills.js",
+      "require": "./lib/polyfills.js",
+      "default": "./lib/polyfills.js"
+    },
+    "./lib/*.js": {
+      "types": "./lib/*.d.ts",
+      "default": "./lib/*.js"
+    },
+    "./lib/*": {
+      "types": "./lib/*.d.ts",
+      "default": "./lib/*.js"
+    }
+  },
   "scripts": {},
   "dependencies": {
     "@temporalio/common": "workspace:*",
     "@temporalio/proto": "workspace:*",
-    "nexus-rpc": "^0.0.2"
+    "@ungap/structured-clone": "^1.3.0",
+    "headers-polyfill": "^4.0.3",
+    "nexus-rpc": "^0.0.2",
+    "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
     "source-map": "^0.7.4"

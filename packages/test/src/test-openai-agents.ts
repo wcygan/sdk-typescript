@@ -76,6 +76,9 @@ import {
   statefulMcpIsolationWorkflow,
   statefulMcpHeartbeatTimeoutWorkflow,
   statefulMcpReplayWorkflow,
+  alsContextShapeSmokeCheckWorkflow,
+  alsLeakDetectionWorkflow,
+  queryTracePropagationWorkflow,
 } from './workflows/openai-agents';
 import { helpers, makeTestFunction } from './helpers-integration';
 import {
@@ -1611,6 +1614,34 @@ test('Tracing utilities return correct values in workflow context', async (t) =>
   });
 });
 
+test('Tracing processor smoke check passes with current upstream shape', async (t) => {
+  const { createWorker, executeWorkflow } = helpers(t);
+
+  const worker = await createWorker({
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('unused')]),
+      }),
+    ],
+  });
+
+  await worker.runUntil(async () => {
+    // First workflow: triggers ensureTracingProcessorRegistered and the ALS smoke check.
+    const result = await executeWorkflow(alsContextShapeSmokeCheckWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+    t.is(result, 'ok', 'Smoke check should not throw — ALS context shape is compatible');
+
+    // Second workflow on the same worker (same V8 isolate): getCurrentTrace() at
+    // workflow start must not see the smoke-check sentinel. If it does, the sentinel
+    // leaked via the broken upstream ALS shim.
+    const leakedTraceId = await executeWorkflow(alsLeakDetectionWorkflow, {
+      workflowExecutionTimeout: '30 seconds',
+    });
+    t.is(leakedTraceId, null, 'Smoke-check sentinel must not leak into subsequent workflows');
+  });
+});
+
 // --- Additional model activity parameters ---
 
 test('Extended model params (priority) pass through without error', async (t) => {
@@ -3016,5 +3047,62 @@ test('Stateful MCP: replay safety with maxCachedWorkflows 0', async (t) => {
 
     // If replay caused NondeterminismError, the workflow would fail instead of returning
     t.regex(result, /replay-safe-data/, 'Workflow must complete without NondeterminismError');
+  });
+});
+
+// --- Query trace context propagation ---
+
+test('Query carries trace context from client to workflow', async (t) => {
+  const { createWorker, taskQueue } = helpers(t);
+
+  const worker = await createWorker({
+    maxCachedWorkflows: 0,
+    plugins: [
+      new OpenAIAgentsPlugin({
+        modelProvider: new FakeModelProvider([textResponse('x')]),
+      }),
+    ],
+  });
+
+  const wfClient = new WorkflowClient({
+    connection: (t.context as any).env.connection,
+    interceptors: [new OpenAIAgentsTraceClientInterceptor()],
+  });
+
+  await worker.runUntil(async () => {
+    const handle = await wfClient.start(queryTracePropagationWorkflow, {
+      taskQueue,
+      workflowId: `query-trace-${Date.now()}`,
+      workflowExecutionTimeout: '30 seconds',
+    });
+
+    const result = await withTrace('query-trace-test', async (trace) => {
+      const clientTraceId = trace.traceId;
+
+      // Poll until the query handler is registered
+      let queryTraceId = 'NO_QUERY_TRACE';
+      for (let i = 0; i < 30; i++) {
+        try {
+          queryTraceId = await handle.query<string>('queryTraceId');
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+
+      return { clientTraceId, queryTraceId };
+    });
+
+    // Signal the workflow to complete
+    await handle.signal('queryTraceTestDone');
+    await handle.result();
+
+    t.truthy(result.clientTraceId, 'Client should have a trace ID');
+    t.not(result.queryTraceId, 'NO_QUERY_TRACE', 'Query handler should have restored trace context');
+    t.is(
+      result.queryTraceId,
+      result.clientTraceId,
+      'Query handler traceId must match client-side traceId (proves query propagation)'
+    );
   });
 });
