@@ -29,8 +29,6 @@ const test = makeTestFunction({
         '--dynamic-config-value',
         'nexusoperation.enableStandalone=true',
         '--dynamic-config-value',
-        'nexusoperation.enableChasm=true',
-        '--dynamic-config-value',
         'system.refreshNexusEndpointsMinWait="0s"',
         '--dynamic-config-value',
         'history.enableChasmCallbacks=true',
