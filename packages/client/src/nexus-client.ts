@@ -361,23 +361,33 @@ export class NexusClient extends BaseClient {
   }
 
   protected _createNexusOperationHandle<O>(opts: { operationId: string; runId?: string }): NexusOperationHandle<O> {
-    let cachedResult: CachedPromise<O> = { state: 'pending' };
+    let cachedResult:
+      | { state: 'not-requested' }
+      | { state: 'success'; value: O }
+      | { state: 'failed'; failure: NexusOperationFailureError } = { state: 'not-requested' };
     return {
       operationId: opts.operationId,
       runId: opts.runId,
       client: this,
       async result(): Promise<O> {
-        switch (cachedResult.state) {
-          case 'pending': {
-            const resultPromise = this.client._getNexusOperationResult({
+        if (cachedResult.state === 'not-requested') {
+          try {
+            const result = (await this.client._getNexusOperationResult({
               operationId: this.operationId,
               runId: this.runId,
-            }) as Promise<O>;
-            cachedResult = { state: 'requested', value: resultPromise };
-            return await cachedResult.value;
+            })) as O;
+            cachedResult = { state: 'success', value: result };
+            return result;
+          } catch (err) {
+            if (err instanceof NexusOperationFailureError) {
+              cachedResult = { state: 'failed', failure: err };
+            }
+            throw err;
           }
-          case 'requested':
-            return await cachedResult.value;
+        } else if (cachedResult.state === 'success') {
+          return cachedResult.value;
+        } else {
+          throw cachedResult.failure;
         }
       },
       async describe(options?: DescribeNexusOperationOptions): Promise<NexusOperationExecutionDescription> {
@@ -405,7 +415,16 @@ export class NexusClient extends BaseClient {
   }
 
   protected _resolveOperationName(operation: unknown, service: nexus.ServiceDefinition): string {
-    if (typeof operation === 'string') return operation;
+    if (typeof operation === 'string') {
+      // Resolve by service name
+      const op = service.operations[operation];
+      if (op != null) {
+        return op.name;
+      } else {
+        // Fallback to provided string
+        return operation;
+      }
+    }
     if (operation && typeof operation === 'object' && 'name' in operation) {
       return (operation as nexus.OperationDefinition<any, any>).name;
     }
@@ -428,10 +447,6 @@ export class NexusClient extends BaseClient {
       try {
         res = await this.connection.workflowService.pollNexusOperationExecution(req);
       } catch (err: unknown) {
-        if (isGrpcServiceError(err) && err.code === grpcStatus.DEADLINE_EXCEEDED) {
-          // Long-poll timed out without a terminal state. Retry.
-          continue;
-        }
         this.rethrowGrpcError(err, 'Failed to poll Nexus operation result', input.operationId);
       }
 
