@@ -6,7 +6,7 @@ import { SymbolBasedInstanceOfError } from '@temporalio/common/lib/type-helpers'
 import {
   decodeTypedSearchAttributes,
   encodeUnifiedSearchAttributes,
-  searchAttributePayloadConverter,
+  typedSearchAttributePayloadConverter,
 } from '@temporalio/common/lib/converter/payload-search-attributes';
 import {
   decodeFromPayloadsAtIndex,
@@ -18,6 +18,8 @@ import { filterNullAndUndefined } from '@temporalio/common/lib/internal-workflow
 import { msOptionalToTs, optionalTsToDate, optionalTsToMs } from '@temporalio/common/lib/time';
 import { temporal } from '@temporalio/proto';
 import type { LoadedDataConverter } from '@temporalio/common';
+import type { SearchAttributeType, TypedSearchAttributeValue } from '@temporalio/common/lib/search-attributes';
+import { decode } from '@temporalio/common/lib/encoding';
 import type { BaseClientOptions, LoadedWithDefaults, WithDefaults } from './base-client';
 import { BaseClient, defaultBaseClientOptions } from './base-client';
 import { isGrpcServiceError, ServiceError } from './errors';
@@ -487,7 +489,7 @@ export class NexusClient extends BaseClient {
     return await nexusOperationExecutionDescriptionFromProto(
       res.info,
       this.dataConverter,
-      res.longPollToken ?? undefined
+      normalizeLongPollToken(res.longPollToken)
     );
   }
 
@@ -685,9 +687,31 @@ function nexusCountFromProto(
     count: raw.count?.toNumber() ?? 0,
     groups: (raw.groups ?? []).map((group) => ({
       count: group.count?.toNumber() ?? 0,
-      groupValues: (group.groupValues ?? []).map((v) => searchAttributePayloadConverter.fromPayload(v)),
+      groupValues: (group.groupValues ?? []).map(decodeCountGroupValue),
     })),
   };
+}
+
+function normalizeLongPollToken(token: Uint8Array | null | undefined): Uint8Array | undefined {
+  return token != null && token.length > 0 ? token : undefined;
+}
+
+function decodeCountGroupValue(value: temporal.api.common.v1.IPayload): TypedSearchAttributeValue<SearchAttributeType> {
+  const decoded = typedSearchAttributePayloadConverter.fromPayload<
+    TypedSearchAttributeValue<SearchAttributeType> | undefined
+  >(value);
+  if (decoded === undefined) {
+    throw new ServiceError(
+      'Received invalid Nexus operation count group value from server: ' +
+        `metadata.type=${decodePayloadMetadata(value.metadata?.type) ?? '<missing>'}, ` +
+        `metadata.encoding=${decodePayloadMetadata(value.metadata?.encoding) ?? '<missing>'}`
+    );
+  }
+  return decoded;
+}
+
+function decodePayloadMetadata(value: Uint8Array | null | undefined): string | undefined {
+  return value == null ? undefined : decode(value);
 }
 
 /**

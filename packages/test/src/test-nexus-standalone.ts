@@ -17,7 +17,7 @@ import {
 } from '@temporalio/client';
 import * as temporalnexus from '@temporalio/nexus';
 import * as workflow from '@temporalio/workflow';
-import { CancelledFailure, TerminatedFailure, ApplicationFailure, NexusOperationFailure } from '@temporalio/common';
+import { CancelledFailure, TerminatedFailure, ApplicationFailure, SearchAttributeType } from '@temporalio/common';
 import { helpers, makeTestFunction } from './helpers-integration';
 import { waitUntil } from './helpers';
 
@@ -250,6 +250,14 @@ test('count and list operations', async (t) => {
       const result = await client.nexus.count(`Endpoint="${endpointName}"`);
       return result.count === 3;
     }, 10000);
+
+    const groupedCount = await client.nexus.count(`Endpoint="${endpointName}" GROUP BY ExecutionStatus`);
+    t.is(groupedCount.count, 3);
+    t.is(groupedCount.groups.length, 1);
+    t.is(groupedCount.groups[0]?.count, 3);
+    const groupValue = groupedCount.groups[0]?.groupValues[0];
+    t.is(groupValue?.type, SearchAttributeType.KEYWORD);
+    t.is(typeof groupValue?.value, 'string');
 
     const seen = new Set<string>();
     for await (const op of client.nexus.list({ query: `Endpoint="${endpointName}"` })) {
